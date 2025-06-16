@@ -102,32 +102,18 @@ handle_selection() {
 
 # Xử lý cài đặt
 handle_installation() {
-    log_info "CHỨC NĂNG CÀI ĐẶT N8N"
-    echo ""
-
-    log_info "Đang kiểm tra yêu cầu hệ thống..."
-    if check_system_requirements; then
-        log_success "Kiểm tra yêu cầu hệ thống thành công"
+    # Source plugin cài đặt
+    local install_plugin="$PROJECT_ROOT/src/plugins/install/main.sh"
+    
+    if [[ -f "$install_plugin" ]]; then
+        source "$install_plugin"
+        # Gọi hàm main của plugin
+        install_n8n_main
     else
-        log_error "Kiểm tra yêu cầu hệ thống thất bại"
+        log_error "Không tìm thấy plugin cài đặt"
+        log_info "Đường dẫn: $install_plugin"
         return 1
     fi
-
-    echo ""
-    log_info "Phương thức cài đặt có sẵn:"
-    echo "1) Cài đặt Docker (khuyến nghị)"
-    echo "2) Cài đặt native"
-    echo "3) Migration từ cài đặt hiện có"
-    echo ""
-
-    read -p "Chọn phương thức cài đặt [1-3]: " method
-
-    case "$method" in
-    1) log_info "Cài đặt Docker - Sắp có..." ;;
-    2) log_info "Cài đặt native - Sắp có..." ;;
-    3) log_info "Migration - Sắp có..." ;;
-    *) log_error "Lựa chọn không hợp lệ: $method" ;;
-    esac
 }
 
 # Xử lý quản lý domain
