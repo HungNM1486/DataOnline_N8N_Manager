@@ -301,42 +301,36 @@ collect_configuration() {
 
 # Tạo docker-compose.yml cho n8n
 create_docker_compose() {
+    set -x # Bật chế độ debug để hiển thị lệnh đang chạy
     log_info "📝 Đang tạo file docker-compose.yml..."
 
     local compose_dir="/opt/n8n"
+    sudo mkdir -p "$compose_dir"
 
-    # Tạo thư mục với error handling
-    if ! sudo mkdir -p "$compose_dir"; then
-        log_error "Không thể tạo thư mục $compose_dir"
-        return 1
-    fi
-
-    # Tạo random password cho PostgreSQL
-    local postgres_password
-    postgres_password=$(generate_random_string 32)
+    local postgres_password=$(generate_random_string 32)
+    echo "Debug: Mật khẩu đã được tạo thành công"
 
     # Tạo file tạm trong /tmp trước
     local temp_compose="/tmp/docker-compose-n8n.yml"
     local temp_env="/tmp/env-n8n"
 
     # Tạo docker-compose.yml trong /tmp
-    cat >"$temp_compose" <<EOF
+    cat >"$temp_compose" <<"DOCKER_EOF"
 version: '3.8'
 
 services:
-  # PostgreSQL Database
   postgres:
     image: postgres:15-alpine
     container_name: n8n-postgres
     restart: unless-stopped
     environment:
       - POSTGRES_USER=n8n
-      - POSTGRES_PASSWORD=$postgres_password
+      - POSTGRES_PASSWORD=PASSWORD_PLACEHOLDER
       - POSTGRES_DB=n8n
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
-      - "$POSTGRES_PORT:5432"
+      - "PG_PORT_PLACEHOLDER:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U n8n"]
       interval: 10s
@@ -345,7 +339,6 @@ services:
     networks:
       - n8n-network
 
-  # N8N Application
   n8n:
     image: n8nio/n8n:latest
     container_name: n8n
@@ -355,33 +348,25 @@ services:
         condition: service_healthy
     environment:
       - N8N_HOST=0.0.0.0
-      - N8N_PORT=$N8N_PORT
+      - N8N_PORT=PORT_PLACEHOLDER
       - N8N_PROTOCOL=http
       - NODE_ENV=production
-      - WEBHOOK_URL=$N8N_WEBHOOK_URL
+      - WEBHOOK_URL=WEBHOOK_PLACEHOLDER
       - GENERIC_TIMEZONE=Asia/Ho_Chi_Minh
-      
-      # Database configuration
       - DB_TYPE=postgresdb
       - DB_POSTGRESDB_HOST=postgres
       - DB_POSTGRESDB_PORT=5432
       - DB_POSTGRESDB_DATABASE=n8n
       - DB_POSTGRESDB_USER=n8n
-      - DB_POSTGRESDB_PASSWORD=$postgres_password
-      
-      # Execution mode
+      - DB_POSTGRESDB_PASSWORD=PASSWORD_PLACEHOLDER
       - EXECUTIONS_MODE=regular
       - EXECUTIONS_PROCESS=main
-      
-      # Security
       - N8N_BASIC_AUTH_ACTIVE=true
       - N8N_BASIC_AUTH_USER=admin
       - N8N_BASIC_AUTH_PASSWORD=changeme
-      
-      # Metrics (optional)
       - N8N_METRICS=false
     ports:
-      - "$N8N_PORT:$N8N_PORT"
+      - "PORT_PLACEHOLDER:PORT_PLACEHOLDER"
     volumes:
       - n8n_data:/home/node/.n8n
       - ./backups:/backups
@@ -397,83 +382,13 @@ volumes:
 networks:
   n8n-network:
     driver: bridge
-version: '3.8'
+DOCKER_EOF
 
-services:
-  # PostgreSQL Database
-  postgres:
-    image: postgres:15-alpine
-    container_name: n8n-postgres
-    restart: unless-stopped
-    environment:
-      - POSTGRES_USER=n8n
-      - POSTGRES_PASSWORD=$postgres_password
-      - POSTGRES_DB=n8n
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    ports:
-      - "$POSTGRES_PORT:5432"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U n8n"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - n8n-network
-
-  # N8N Application
-  n8n:
-    image: n8nio/n8n:latest
-    container_name: n8n
-    restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
-    environment:
-      - N8N_HOST=0.0.0.0
-      - N8N_PORT=$N8N_PORT
-      - N8N_PROTOCOL=http
-      - NODE_ENV=production
-      - WEBHOOK_URL=$N8N_WEBHOOK_URL
-      - GENERIC_TIMEZONE=Asia/Ho_Chi_Minh
-      
-      # Database configuration
-      - DB_TYPE=postgresdb
-      - DB_POSTGRESDB_HOST=postgres
-      - DB_POSTGRESDB_PORT=5432
-      - DB_POSTGRESDB_DATABASE=n8n
-      - DB_POSTGRESDB_USER=n8n
-      - DB_POSTGRESDB_PASSWORD=$postgres_password
-      
-      # Execution mode
-      - EXECUTIONS_MODE=regular
-      - EXECUTIONS_PROCESS=main
-      
-      # Security
-      - N8N_BASIC_AUTH_ACTIVE=true
-      - N8N_BASIC_AUTH_USER=admin
-      - N8N_BASIC_AUTH_PASSWORD=changeme
-      
-      # Metrics (optional)
-      - N8N_METRICS=false
-    ports:
-      - "$N8N_PORT:$N8N_PORT"
-    volumes:
-      - n8n_data:/home/node/.n8n
-      - ./backups:/backups
-    networks:
-      - n8n-network
-
-volumes:
-  postgres_data:
-    driver: local
-  n8n_data:
-    driver: local
-
-networks:
-  n8n-network:
-    driver: bridge
-EOF
+    echo "Debug: Thay thế các placeholder"
+    sed -i "s#PASSWORD_PLACEHOLDER#$postgres_password#g" "$temp_compose"
+    sed -i "s#PG_PORT_PLACEHOLDER#$POSTGRES_PORT#g" "$temp_compose"
+    sed -i "s#PORT_PLACEHOLDER#$N8N_PORT#g" "$temp_compose"
+    sed -i "s#WEBHOOK_PLACEHOLDER#$N8N_WEBHOOK_URL#g" "$temp_compose"
 
     # Kiểm tra file tạm
     if [[ ! -f "$temp_compose" ]]; then
@@ -499,7 +414,6 @@ POSTGRES_PASSWORD=$postgres_password
 BACKUP_ENABLED=true
 BACKUP_RETENTION_DAYS=30
 EOF
-
     # Copy files với sudo
     if ! sudo cp "$temp_compose" "$compose_dir/docker-compose.yml"; then
         log_error "Không thể copy docker-compose.yml"
@@ -527,6 +441,8 @@ EOF
     config_set "n8n.compose_dir" "$compose_dir"
     config_set "n8n.port" "$N8N_PORT"
     config_set "n8n.webhook_url" "$N8N_WEBHOOK_URL"
+
+    set +x # Tắt chế độ debug
 }
 
 # Khởi động n8n với Docker
