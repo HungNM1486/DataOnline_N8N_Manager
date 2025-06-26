@@ -485,6 +485,17 @@ start_n8n_docker() {
         return 1
     fi
 
+    # Khởi tạo backup tự động
+    log_info "🔧 Cấu hình backup tự động..."
+    local backup_plugin="$PLUGIN_PROJECT_ROOT/src/plugins/backup/main.sh"
+    if [[ -f "$backup_plugin" ]]; then
+        source "$backup_plugin"
+        init_backup_on_install
+    else
+        log_warn "⚠️ Không tìm thấy plugin backup"
+    fi
+
+
     return 0
 }
 

@@ -104,7 +104,7 @@ handle_selection() {
 handle_installation() {
     # Source plugin cài đặt
     local install_plugin="$PROJECT_ROOT/src/plugins/install/main.sh"
-    
+
     if [[ -f "$install_plugin" ]]; then
         source "$install_plugin"
         # Gọi hàm main của plugin
@@ -137,9 +137,18 @@ handle_service_management() {
 
 # Xử lý backup & restore
 handle_backup_restore() {
-    log_info "SAO LƯU & KHÔI PHỤC"
-    echo ""
-    log_info "Tính năng này sẽ sớm có sẵn..."
+    # Source plugin backup
+    local backup_plugin="$PROJECT_ROOT/src/plugins/backup/main.sh"
+
+    if [[ -f "$backup_plugin" ]]; then
+        source "$backup_plugin"
+        # Gọi menu backup
+        backup_menu_main
+    else
+        log_error "Không tìm thấy plugin backup"
+        log_info "Đường dẫn: $backup_plugin"
+        return 1
+    fi
 }
 
 # Xử lý updates
