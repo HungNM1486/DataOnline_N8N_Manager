@@ -1,8 +1,7 @@
 #!/bin/bash
 
-# DataOnline N8N Manager - Plugin Cài đặt N8N
+# DataOnline N8N Manager - Enhanced Install Plugin with UI
 # Phiên bản: 1.0.0
-# Mô tả: Plugin cài đặt n8n với Docker và PostgreSQL
 
 set -euo pipefail
 
@@ -10,7 +9,7 @@ set -euo pipefail
 PLUGIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_PROJECT_ROOT="$(dirname "$(dirname "$PLUGIN_DIR")")"
 
-# Kiểm tra xem core modules đã được load chưa
+# Load core modules
 if [[ -z "${LOGGER_LOADED:-}" ]]; then
     source "$PLUGIN_PROJECT_ROOT/src/core/logger.sh"
 fi
@@ -20,302 +19,361 @@ fi
 if [[ -z "${UTILS_LOADED:-}" ]]; then
     source "$PLUGIN_PROJECT_ROOT/src/core/utils.sh"
 fi
+if [[ -z "${UI_LOADED:-}" ]]; then
+    source "$PLUGIN_PROJECT_ROOT/src/core/ui.sh"
+fi
+if [[ -z "${SPINNER_LOADED:-}" ]]; then
+    source "$PLUGIN_PROJECT_ROOT/src/core/spinner.sh"
+fi
 
-# Constants cho plugin
-readonly DOCKER_COMPOSE_VERSION="2.24.5"
-readonly REQUIRED_RAM_MB=2048 # 2GB RAM tối thiểu
-readonly REQUIRED_DISK_GB=10  # 10GB disk tối thiểu
+# Constants
+readonly INSTALL_DOCKER_COMPOSE_VERSION="2.24.5"
+readonly REQUIRED_RAM_MB=2048
+readonly REQUIRED_DISK_GB=10
 readonly N8N_DEFAULT_PORT=5678
 readonly POSTGRES_DEFAULT_PORT=5432
 
-# Biến global cho installation
-INSTALL_TYPE="" # docker, native, migrate
+# Global variables
+INSTALL_TYPE=""
 N8N_PORT=""
 POSTGRES_PORT=""
 N8N_DOMAIN=""
 N8N_WEBHOOK_URL=""
 
-# ===== PHẦN 1: KIỂM TRA HỆ THỐNG =====
+# ===== SYSTEM REQUIREMENTS CHECK =====
 
-# Kiểm tra yêu cầu hệ thống cho n8n
 check_n8n_requirements() {
-    log_info "🔍 Đang kiểm tra yêu cầu hệ thống cho n8n..."
+    ui_header "Kiểm tra yêu cầu hệ thống"
+
     local errors=0
-
-    # Kiểm tra OS version
-    local ubuntu_version
-    ubuntu_version=$(get_ubuntu_version)
-
-    if [[ "${ubuntu_version%%.*}" -lt 18 ]]; then
-        log_error "❌ Yêu cầu Ubuntu 18.04 trở lên (hiện tại: $ubuntu_version)"
-        ((errors++))
-    else
-        log_success "✅ Ubuntu version: $ubuntu_version"
-    fi
-
-    # Kiểm tra RAM
-    local total_ram_mb
-    total_ram_mb=$(free -m | awk '/^Mem:/ {print $2}')
-
-    if [[ "$total_ram_mb" -lt "$REQUIRED_RAM_MB" ]]; then
-        log_error "❌ RAM không đủ: ${total_ram_mb}MB (yêu cầu >= ${REQUIRED_RAM_MB}MB)"
-        ((errors++))
-    else
-        log_success "✅ RAM: ${total_ram_mb}MB"
-    fi
-
-    # Kiểm tra CPU cores
-    local cpu_cores
-    cpu_cores=$(nproc)
-
-    if [[ "$cpu_cores" -lt 2 ]]; then
-        log_warn "⚠️  CPU cores: $cpu_cores (khuyến nghị >= 2)"
-    else
-        log_success "✅ CPU cores: $cpu_cores"
-    fi
-
-    # Kiểm tra disk space
-    local free_disk_gb
-    free_disk_gb=$(df -BG / | awk 'NR==2 {print $4}' | sed 's/G//')
-
-    if [[ "$free_disk_gb" -lt "$REQUIRED_DISK_GB" ]]; then
-        log_error "❌ Dung lượng đĩa không đủ: ${free_disk_gb}GB (yêu cầu >= ${REQUIRED_DISK_GB}GB)"
-        ((errors++))
-    else
-        log_success "✅ Dung lượng đĩa trống: ${free_disk_gb}GB"
-    fi
-
-    # Kiểm tra kết nối internet
-    if ! check_internet_connection; then
-        log_error "❌ Không có kết nối internet"
-        ((errors++))
-    else
-        log_success "✅ Kết nối internet OK"
-    fi
-
-    return $errors
-}
-
-# ===== PHẦN 2: CÀI ĐẶT DEPENDENCIES =====
-
-# Cài đặt Docker và Docker Compose
-install_docker() {
-    log_info "🐳 Đang cài đặt Docker..."
-
-    # Kiểm tra Docker đã cài chưa
-    if command_exists docker; then
-        local docker_version
-        docker_version=$(docker --version | cut -d' ' -f3 | cut -d',' -f1)
-        log_success "✅ Docker đã được cài đặt: $docker_version"
-        return 0
-    fi
-
-    # Cài đặt Docker
-    log_info "📦 Đang cài đặt Docker từ repository chính thức..."
-
-    # Xóa phiên bản cũ nếu có
-    sudo apt-get remove -y docker docker-engine docker.io containerd runc 2>/dev/null || true
-
-    # Cài đặt dependencies
-    sudo apt-get update
-    sudo apt-get install -y \
-        apt-transport-https \
-        ca-certificates \
-        curl \
-        gnupg \
-        lsb-release
-
-    # Thêm Docker GPG key
-    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
-
-    # Thêm Docker repository
-    echo \
-        "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu \
-        $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list >/dev/null
-
-    # Cài đặt Docker Engine
-    sudo apt-get update
-    sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
-
-    # Thêm user hiện tại vào docker group
-    sudo usermod -aG docker "$USER"
-
-    # Khởi động Docker
-    sudo systemctl enable docker
-    sudo systemctl start docker
-
-    log_success "✅ Docker đã được cài đặt thành công"
-    log_warn "⚠️  Bạn cần logout và login lại để sử dụng Docker không cần sudo"
-}
-
-# Cài đặt các dependencies khác
-install_dependencies() {
-    log_info "📦 Đang cài đặt các dependencies cần thiết..."
-
-    local packages=(
-        "nginx"             # Reverse proxy
-        "postgresql-client" # PostgreSQL client tools
-        "jq"                # JSON processing
-        "curl"              # HTTP client
-        "wget"              # Download tool
-        "git"               # Version control
-        "htop"              # System monitoring
-        "ncdu"              # Disk usage analyzer
+    local checks=(
+        "check_os_version"
+        "check_ram_requirements"
+        "check_disk_space"
+        "check_cpu_cores"
+        "check_internet_connection"
+        "check_required_commands"
     )
 
-    for package in "${packages[@]}"; do
-        if ! dpkg -l | grep -q "^ii  $package "; then
-            log_info "📥 Đang cài đặt $package..."
-            sudo apt-get install -y "$package"
-        else
-            log_debug "✓ $package đã được cài đặt"
+    for check in "${checks[@]}"; do
+        if ! $check; then
+            ((errors++))
         fi
     done
 
-    log_success "✅ Đã cài đặt tất cả dependencies"
+    echo ""
+    if [[ $errors -eq 0 ]]; then
+        ui_status "success" "Tất cả yêu cầu hệ thống đều được đáp ứng"
+        return 0
+    else
+        ui_status "error" "Phát hiện $errors lỗi yêu cầu hệ thống"
+        return 1
+    fi
 }
 
-# ===== PHẦN 3: CHỌN PHƯƠNG THỨC CÀI ĐẶT =====
+check_os_version() {
+    local ubuntu_version=$(get_ubuntu_version)
 
-# Menu chọn phương thức cài đặt
-show_install_method_menu() {
-    echo ""
-    log_info "🚀 CHỌN PHƯƠNG THỨC CÀI ĐẶT N8N"
-    echo ""
-    echo "1) 🐳 Cài đặt với Docker (Khuyến nghị)"
-    echo "   - Dễ quản lý và nâng cấp"
-    echo "   - Tự động cấu hình PostgreSQL"
-    echo "   - Isolation tốt hơn"
-    echo ""
-    echo "2) 📦 Cài đặt Native (Nâng cao)"
-    echo "   - Performance tốt hơn"
-    echo "   - Yêu cầu cấu hình thủ công nhiều hơn"
-    echo ""
-    echo "3) 🔄 Migration từ n8n hiện có"
-    echo "   - Chuyển đổi từ cài đặt cũ"
-    echo "   - Giữ nguyên workflows và credentials"
-    echo ""
-    echo "0) ❌ Quay lại"
-    echo ""
-
-    read -p "Chọn phương thức [1-3, 0]: " choice
-
-    case "$choice" in
-    1) INSTALL_TYPE="docker" ;;
-    2) INSTALL_TYPE="native" ;;
-    3) INSTALL_TYPE="migrate" ;;
-    0) return 1 ;;
-    *)
-        log_error "Lựa chọn không hợp lệ: $choice"
+    if [[ "${ubuntu_version%%.*}" -lt 18 ]]; then
+        ui_status "error" "Ubuntu ${ubuntu_version} - Yêu cầu 18.04+"
         return 1
-        ;;
-    esac
+    else
+        ui_status "success" "Ubuntu ${ubuntu_version}"
+        return 0
+    fi
+}
+
+check_ram_requirements() {
+    local total_ram_mb=$(free -m | awk '/^Mem:/ {print $2}')
+
+    if [[ "$total_ram_mb" -lt "$REQUIRED_RAM_MB" ]]; then
+        ui_status "error" "RAM: ${total_ram_mb}MB (yêu cầu ${REQUIRED_RAM_MB}MB+)"
+        return 1
+    else
+        ui_status "success" "RAM: ${total_ram_mb}MB"
+        return 0
+    fi
+}
+
+check_disk_space() {
+    local free_disk_gb=$(df -BG / | awk 'NR==2 {print $4}' | sed 's/G//')
+
+    if [[ "$free_disk_gb" -lt "$REQUIRED_DISK_GB" ]]; then
+        ui_status "error" "Disk: ${free_disk_gb}GB (yêu cầu ${REQUIRED_DISK_GB}GB+)"
+        return 1
+    else
+        ui_status "success" "Disk: ${free_disk_gb}GB available"
+        return 0
+    fi
+}
+
+check_cpu_cores() {
+    local cpu_cores=$(nproc)
+
+    if [[ "$cpu_cores" -lt 2 ]]; then
+        ui_status "warning" "CPU: $cpu_cores core (khuyến nghị 2+)"
+        return 0
+    else
+        ui_status "success" "CPU: $cpu_cores cores"
+        return 0
+    fi
+}
+
+check_internet_connection() {
+    if ping -c 1 -W 2 google.com >/dev/null 2>&1 || ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1; then
+        ui_status "success" "Kết nối internet OK"
+        return 0
+    else
+        ui_status "error" "Không có kết nối internet"
+        return 1
+    fi
+}
+
+check_required_commands() {
+    local commands=("curl" "wget" "git" "jq")
+    local missing=()
+
+    for cmd in "${commands[@]}"; do
+        if ! command_exists "$cmd"; then
+            missing+=("$cmd")
+        fi
+    done
+
+    if [[ ${#missing[@]} -eq 0 ]]; then
+        ui_status "success" "Tất cả commands cần thiết đã có"
+        return 0
+    else
+        ui_status "warning" "Thiếu commands: ${missing[*]} (sẽ cài đặt tự động)"
+        return 0
+    fi
+}
+
+# ===== DEPENDENCIES INSTALLATION =====
+
+install_docker() {
+    ui_section "Cài đặt Docker"
+
+    if command_exists docker; then
+        local docker_version=$(docker --version | cut -d' ' -f3 | cut -d',' -f1)
+        ui_status "success" "Docker đã cài đặt: $docker_version"
+        return 0
+    fi
+
+    # Install Docker
+    if ! ui_run_command "Cài đặt Docker dependencies" "sudo apt-get update && sudo apt-get install -y apt-transport-https ca-certificates curl gnupg lsb-release"; then
+        return 1
+    fi
+
+    if ! ui_run_command "Thêm Docker GPG key" "curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg"; then
+        return 1
+    fi
+
+    if ! ui_run_command "Thêm Docker repository" 'echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null'; then
+        return 1
+    fi
+
+    if ! ui_run_command "Cài đặt Docker Engine" "sudo apt-get update && sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin"; then
+        return 1
+    fi
+
+    if ! ui_run_command "Cấu hình Docker user" "sudo usermod -aG docker $USER"; then
+        return 1
+    fi
+
+    if ! ui_run_command "Khởi động Docker" "sudo systemctl enable docker && sudo systemctl start docker"; then
+        return 1
+    fi
+
+    ui_warning_box "Thông báo quan trọng" \
+        "Bạn cần logout và login lại để sử dụng Docker không cần sudo"
 
     return 0
 }
 
-# ===== PHẦN 4: CẤU HÌNH CƠ BẢN =====
+install_dependencies() {
+    ui_section "Cài đặt Dependencies"
 
-# Thu thập thông tin cấu hình từ user
-collect_configuration() {
-    log_info "⚙️  CẤU HÌNH CƠ BẢN CHO N8N"
-    echo ""
+    local packages=(
+        "nginx:Reverse proxy server"
+        "postgresql-client:PostgreSQL client tools"
+        "jq:JSON processor"
+        "curl:HTTP client"
+        "wget:Download utility"
+        "git:Version control"
+        "htop:System monitor"
+        "ncdu:Disk usage analyzer"
+    )
 
-    # Port cho n8n
-    while true; do
-        read -p "Port cho n8n (mặc định $N8N_DEFAULT_PORT): " N8N_PORT
-        N8N_PORT=${N8N_PORT:-$N8N_DEFAULT_PORT}
+    ui_show_progress 0 ${#packages[@]} "Chuẩn bị cài đặt packages"
 
-        if [[ ! "$N8N_PORT" =~ ^[0-9]+$ ]] || [[ "$N8N_PORT" -lt 1 ]] || [[ "$N8N_PORT" -gt 65535 ]]; then
-            log_error "Port không hợp lệ: $N8N_PORT"
-            continue
+    if ! ui_run_command "Cập nhật package list" "sudo apt-get update"; then
+        return 1
+    fi
+
+    local i=1
+    for package_info in "${packages[@]}"; do
+        local package="${package_info%%:*}"
+        local description="${package_info##*:}"
+
+        ui_show_progress $i ${#packages[@]} "Cài đặt $package"
+
+        if ! dpkg -l | grep -q "^ii  $package "; then
+            if ! install_spinner "Cài đặt $package ($description)" "sudo apt-get install -y $package"; then
+                ui_status "error" "Lỗi cài đặt $package"
+                return 1
+            fi
+        else
+            ui_status "success" "$package đã cài đặt"
         fi
 
-        if ! is_port_available "$N8N_PORT"; then
-            log_error "Port $N8N_PORT đã được sử dụng"
-            continue
-        fi
-
-        break
+        ((i++))
     done
 
-    # Port cho PostgreSQL (chỉ cho Docker)
+    return 0
+}
+
+# ===== INSTALLATION METHOD SELECTION =====
+
+show_install_method_menu() {
+    ui_header "Chọn phương thức cài đặt N8N"
+
+    ui_info_box "Lưu ý" \
+        "Docker là phương thức được khuyến nghị cho người mới" \
+        "Native phù hợp với người có kinh nghiệm hệ thống" \
+        "Migration giúp chuyển đổi từ N8N cũ"
+
+    echo "1) 🐳 Docker (Khuyến nghị) - Dễ quản lý, tự động PostgreSQL"
+    echo "2) 📦 Native - Performance cao, cấu hình thủ công"
+    echo "3) 🔄 Migration - Chuyển từ cài đặt cũ"
+    echo ""
+
+    while true; do
+        echo -n -e "${UI_WHITE}Chọn [1-3]: ${UI_NC}"
+        read -r choice
+
+        case "$choice" in
+        1)
+            INSTALL_TYPE="docker"
+            break
+            ;;
+        2)
+            INSTALL_TYPE="native"
+            break
+            ;;
+        3)
+            INSTALL_TYPE="migrate"
+            break
+            ;;
+        *) ui_status "error" "Lựa chọn không hợp lệ" ;;
+        esac
+    done
+
+    ui_status "info" "Đã chọn: $INSTALL_TYPE"
+    return 0
+}
+
+# ===== CONFIGURATION COLLECTION =====
+
+collect_configuration() {
+    ui_header "Cấu hình N8N"
+
+    # N8N Port
+    while true; do
+        echo -n -e "${UI_WHITE}Port cho N8N (mặc định $N8N_DEFAULT_PORT): ${UI_NC}"
+        read -r N8N_PORT
+        N8N_PORT=${N8N_PORT:-$N8N_DEFAULT_PORT}
+
+        if ui_validate_port "$N8N_PORT"; then
+            if is_port_available "$N8N_PORT"; then
+                ui_status "success" "Port N8N: $N8N_PORT"
+                break
+            else
+                ui_status "error" "Port $N8N_PORT đã được sử dụng"
+            fi
+        else
+            ui_status "error" "Port không hợp lệ: $N8N_PORT"
+        fi
+    done
+
+    # PostgreSQL Port (chỉ cho Docker)
     if [[ "$INSTALL_TYPE" == "docker" ]]; then
         while true; do
-            read -p "Port cho PostgreSQL (mặc định $POSTGRES_DEFAULT_PORT): " POSTGRES_PORT
+            echo -n -e "${UI_WHITE}Port cho PostgreSQL (mặc định $POSTGRES_DEFAULT_PORT): ${UI_NC}"
+            read -r POSTGRES_PORT
             POSTGRES_PORT=${POSTGRES_PORT:-$POSTGRES_DEFAULT_PORT}
 
-            if [[ ! "$POSTGRES_PORT" =~ ^[0-9]+$ ]] || [[ "$POSTGRES_PORT" -lt 1 ]] || [[ "$POSTGRES_PORT" -gt 65535 ]]; then
-                log_error "Port không hợp lệ: $POSTGRES_PORT"
-                continue
+            if ui_validate_port "$POSTGRES_PORT"; then
+                if is_port_available "$POSTGRES_PORT"; then
+                    ui_status "success" "Port PostgreSQL: $POSTGRES_PORT"
+                    break
+                else
+                    ui_status "error" "Port $POSTGRES_PORT đã được sử dụng"
+                fi
+            else
+                ui_status "error" "Port không hợp lệ: $POSTGRES_PORT"
             fi
-
-            if ! is_port_available "$POSTGRES_PORT"; then
-                log_error "Port $POSTGRES_PORT đã được sử dụng"
-                continue
-            fi
-
-            break
         done
     fi
 
-    # Domain (tùy chọn)
-    read -p "Domain cho n8n (để trống nếu chưa có): " N8N_DOMAIN
+    # Domain (optional)
+    echo -n -e "${UI_WHITE}Domain cho N8N (để trống nếu chưa có): ${UI_NC}"
+    read -r N8N_DOMAIN
 
-    if [[ -n "$N8N_DOMAIN" ]]; then
-        if ! is_valid_domain "$N8N_DOMAIN"; then
-            log_warn "⚠️  Domain có vẻ không hợp lệ: $N8N_DOMAIN"
-            read -p "Bạn có chắc muốn sử dụng domain này? [y/N]: " confirm
-            if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
-                N8N_DOMAIN=""
-            fi
+    if [[ -n "$N8N_DOMAIN" ]] && ! ui_validate_domain "$N8N_DOMAIN"; then
+        echo -n -e "${UI_YELLOW}Domain có vẻ không hợp lệ. Bạn có chắc muốn sử dụng '$N8N_DOMAIN'? [y/N]: ${UI_NC}"
+        read -r confirm
+        if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+            N8N_DOMAIN=""
         fi
     fi
 
     # Webhook URL
     if [[ -n "$N8N_DOMAIN" ]]; then
         N8N_WEBHOOK_URL="https://$N8N_DOMAIN"
+        ui_status "success" "Domain: $N8N_DOMAIN"
     else
-        local public_ip
-        public_ip=$(get_public_ip || echo "localhost")
+        local public_ip=$(get_public_ip || echo "localhost")
         N8N_WEBHOOK_URL="http://$public_ip:$N8N_PORT"
+        ui_status "info" "Sử dụng IP: $public_ip"
     fi
 
-    # Hiển thị tóm tắt cấu hình
-    echo ""
-    log_info "📋 TÓM TẮT CẤU HÌNH:"
-    echo "   • Phương thức: $INSTALL_TYPE"
-    echo "   • N8N Port: $N8N_PORT"
-    [[ "$INSTALL_TYPE" == "docker" ]] && echo "   • PostgreSQL Port: $POSTGRES_PORT"
-    [[ -n "$N8N_DOMAIN" ]] && echo "   • Domain: $N8N_DOMAIN"
-    echo "   • Webhook URL: $N8N_WEBHOOK_URL"
-    echo ""
+    # Configuration summary
+    ui_info_box "Tóm tắt cấu hình" \
+        "Phương thức: $INSTALL_TYPE" \
+        "N8N Port: $N8N_PORT" \
+        "$([ "$INSTALL_TYPE" == "docker" ] && echo "PostgreSQL Port: $POSTGRES_PORT")" \
+        "$([ -n "$N8N_DOMAIN" ] && echo "Domain: $N8N_DOMAIN")" \
+        "Webhook URL: $N8N_WEBHOOK_URL"
 
-    read -p "Xác nhận cấu hình? [Y/n]: " confirm
-    [[ "$confirm" =~ ^[Nn]$ ]] && return 1
-
-    return 0
+    echo -n -e "${UI_YELLOW}Xác nhận cấu hình? [Y/n]: ${UI_NC}"
+    read -r confirm
+    if [[ "$confirm" =~ ^[Nn]$ ]]; then
+        return 1
+    else
+        return 0
+    fi
 }
 
-# ===== PHẦN 5: CÀI ĐẶT DOCKER =====
+# ===== DOCKER INSTALLATION =====
 
-# Tạo docker-compose.yml cho n8n
 create_docker_compose() {
-    set -x # Bật chế độ debug để hiển thị lệnh đang chạy
-    log_info "📝 Đang tạo file docker-compose.yml..."
+    ui_section "Tạo Docker Compose Configuration"
 
     local compose_dir="/opt/n8n"
-    sudo mkdir -p "$compose_dir"
+
+    if ! ui_run_command "Tạo thư mục cài đặt" "sudo mkdir -p $compose_dir"; then
+        return 1
+    fi
 
     local postgres_password=$(generate_random_string 32)
-    echo "Debug: Mật khẩu đã được tạo thành công"
 
-    # Tạo file tạm trong /tmp trước
+    # Create temp files
     local temp_compose="/tmp/docker-compose-n8n.yml"
     local temp_env="/tmp/env-n8n"
 
-    # Tạo docker-compose.yml trong /tmp
-    cat >"$temp_compose" <<"DOCKER_EOF"
+    ui_start_spinner "Tạo docker-compose.yml"
+
+    cat >"$temp_compose" <<'DOCKER_EOF'
 version: '3.8'
 
 services:
@@ -384,19 +442,17 @@ networks:
     driver: bridge
 DOCKER_EOF
 
-    echo "Debug: Thay thế các placeholder"
+    # Replace placeholders
     sed -i "s#PASSWORD_PLACEHOLDER#$postgres_password#g" "$temp_compose"
     sed -i "s#PG_PORT_PLACEHOLDER#$POSTGRES_PORT#g" "$temp_compose"
     sed -i "s#PORT_PLACEHOLDER#$N8N_PORT#g" "$temp_compose"
     sed -i "s#WEBHOOK_PLACEHOLDER#$N8N_WEBHOOK_URL#g" "$temp_compose"
 
-    # Kiểm tra file tạm
-    if [[ ! -f "$temp_compose" ]]; then
-        log_error "Không thể tạo file docker-compose tạm"
-        return 1
-    fi
+    ui_stop_spinner
 
-    # Tạo .env file trong /tmp
+    # Create .env file
+    ui_start_spinner "Tạo file environment"
+
     cat >"$temp_env" <<EOF
 # DataOnline N8N Manager - Environment Variables
 # Generated at: $(date)
@@ -414,98 +470,216 @@ POSTGRES_PASSWORD=$postgres_password
 BACKUP_ENABLED=true
 BACKUP_RETENTION_DAYS=30
 EOF
-    # Copy files với sudo
-    if ! sudo cp "$temp_compose" "$compose_dir/docker-compose.yml"; then
-        log_error "Không thể copy docker-compose.yml"
+
+    ui_stop_spinner
+
+    # Copy files
+    if ! ui_run_command "Sao chép docker-compose.yml" "sudo cp $temp_compose $compose_dir/docker-compose.yml"; then
         rm -f "$temp_compose" "$temp_env"
         return 1
     fi
 
-    if ! sudo cp "$temp_env" "$compose_dir/.env"; then
-        log_error "Không thể copy .env file"
+    if ! ui_run_command "Sao chép .env file" "sudo cp $temp_env $compose_dir/.env"; then
         rm -f "$temp_compose" "$temp_env"
         return 1
     fi
 
     # Set permissions
-    sudo chmod 644 "$compose_dir/docker-compose.yml"
-    sudo chmod 600 "$compose_dir/.env"
+    if ! ui_run_command "Cấp quyền files" "sudo chmod 644 $compose_dir/docker-compose.yml && sudo chmod 600 $compose_dir/.env"; then
+        return 1
+    fi
 
-    # Cleanup temp files
+    # Cleanup
     rm -f "$temp_compose" "$temp_env"
 
-    log_success "✅ Đã tạo docker-compose.yml và .env"
-
-    # Lưu cấu hình vào config hệ thống
+    # Save config
     config_set "n8n.install_type" "docker"
     config_set "n8n.compose_dir" "$compose_dir"
     config_set "n8n.port" "$N8N_PORT"
     config_set "n8n.webhook_url" "$N8N_WEBHOOK_URL"
 
-    set +x # Tắt chế độ debug
+    ui_status "success" "Docker Compose configuration tạo thành công"
+    return 0
 }
 
-# Khởi động n8n với Docker
 start_n8n_docker() {
-    log_info "🚀 Đang khởi động n8n với Docker..."
+    ui_section "Khởi động N8N với Docker"
 
     local compose_dir="/opt/n8n"
-    cd "$compose_dir"
+    cd "$compose_dir" || return 1
 
-    # Pull images
-    log_info "📥 Đang tải Docker images..."
-    sudo docker compose pull
+    if ! ui_run_command "Tải Docker images" "sudo docker compose pull"; then
+        return 1
+    fi
 
-    # Start services
-    log_info "▶️  Đang khởi động services..."
-    sudo docker compose up -d
+    if ! ui_run_command "Khởi động containers" "sudo docker compose up -d"; then
+        return 1
+    fi
 
-    # Chờ services khởi động
-    log_info "⏳ Đang chờ services khởi động..."
-
+    # Wait for N8N to be ready
+    ui_start_spinner "Chờ N8N khởi động"
     local max_wait=60
     local waited=0
 
     while [[ $waited -lt $max_wait ]]; do
         if curl -s "http://localhost:$N8N_PORT/healthz" >/dev/null 2>&1; then
-            log_success "✅ N8N đã khởi động thành công!"
+            ui_stop_spinner
+            ui_status "success" "N8N đã khởi động thành công!"
             break
         fi
-
         sleep 2
         ((waited += 2))
-        echo -n "."
     done
 
-    echo ""
-
     if [[ $waited -ge $max_wait ]]; then
-        log_error "❌ Timeout khi chờ n8n khởi động"
-        log_info "Kiểm tra logs: sudo docker compose logs"
+        ui_stop_spinner
+        ui_status "error" "Timeout chờ N8N khởi động"
+        ui_status "info" "Kiểm tra logs: sudo docker compose logs -f"
         return 1
     fi
 
-    # Khởi tạo backup tự động
-    log_info "🔧 Cấu hình backup tự động..."
-    local backup_plugin="$PLUGIN_PROJECT_ROOT/src/plugins/backup/main.sh"
-    if [[ -f "$backup_plugin" ]]; then
-        source "$backup_plugin"
-        init_backup_on_install
-    else
-        log_warn "⚠️ Không tìm thấy plugin backup"
-    fi
-
-
+    cd - >/dev/null
     return 0
 }
 
-# ===== PHẦN 6: TẠO SYSTEMD SERVICE =====
+# ===== VERIFICATION =====
 
-# Tạo systemd service cho Docker Compose
+verify_installation() {
+    ui_header "Kiểm tra cài đặt"
+
+    local errors=0
+
+    # Check containers
+    if [[ "$INSTALL_TYPE" == "docker" ]]; then
+        local containers=("n8n" "n8n-postgres")
+        for container in "${containers[@]}"; do
+            if sudo docker ps --format "table {{.Names}}" | grep -q "^$container$"; then
+                ui_status "success" "Container $container đang chạy"
+            else
+                ui_status "error" "Container $container không chạy"
+                ((errors++))
+            fi
+        done
+    fi
+
+    # Check N8N API
+    if curl -s "http://localhost:$N8N_PORT/healthz" >/dev/null 2>&1; then
+        ui_status "success" "N8N API hoạt động"
+    else
+        ui_status "error" "N8N API không phản hồi"
+        ((errors++))
+    fi
+
+    # Check database
+    if [[ "$INSTALL_TYPE" == "docker" ]]; then
+        if sudo docker exec n8n-postgres pg_isready -U n8n >/dev/null 2>&1; then
+            ui_status "success" "PostgreSQL hoạt động"
+        else
+            ui_status "error" "PostgreSQL lỗi"
+            ((errors++))
+        fi
+    fi
+
+    # Show access info
+    ui_info_box "Thông tin truy cập N8N" \
+        "URL: http://localhost:$N8N_PORT" \
+        "$([ -n "$N8N_DOMAIN" ] && echo "Domain: https://$N8N_DOMAIN")" \
+        "Username: admin" \
+        "Password: changeme" \
+        "⚠️ QUAN TRỌNG: Đổi password ngay!"
+
+    if [[ $errors -eq 0 ]]; then
+        ui_status "success" "Cài đặt hoàn tất - Tất cả dịch vụ hoạt động!"
+        return 0
+    else
+        ui_status "error" "Phát hiện $errors lỗi"
+        return 1
+    fi
+}
+
+# ===== MAIN INSTALLATION FUNCTION =====
+
+install_n8n_main() {
+    ui_header "DataOnline N8N Installation"
+
+    # Check for existing installation
+    if [[ -d "/opt/n8n" && -f "/opt/n8n/docker-compose.yml" ]]; then
+        ui_warning_box "Cảnh báo" \
+            "Phát hiện N8N đã được cài đặt" \
+            "Sử dụng chức năng 'Xóa N8N và cài đặt lại' để cài đặt lại"
+
+        if ! ui_confirm "Tiếp tục cài đặt?"; then
+            return 0
+        fi
+    fi
+
+    # Step 1: System requirements
+    if ! check_n8n_requirements; then
+        ui_status "error" "Hệ thống không đáp ứng yêu cầu"
+        return 1
+    fi
+
+    if ! ui_confirm "Tiếp tục cài đặt?"; then
+        return 0
+    fi
+
+    # Step 2: Installation method
+    if ! show_install_method_menu; then
+        return 0
+    fi
+
+    # Handle native installation limitation
+    if [[ "$INSTALL_TYPE" == "native" ]]; then
+        ui_warning_box "Thông báo" \
+            "Cài đặt Native chưa được hỗ trợ trong phiên bản này" \
+            "Vui lòng chọn Docker installation"
+        return 1
+    fi
+
+    # Step 3: Configuration
+    if ! collect_configuration; then
+        return 1
+    fi
+
+    # Rollback trap
+    trap 'ui_status "error" "Lỗi cài đặt - đang rollback..."; rollback_installation; return 1' ERR
+
+    # Step 4: Install dependencies
+    install_dependencies || return 1
+    install_docker || return 1
+
+    # Step 5: Docker setup
+    case "$INSTALL_TYPE" in
+    "docker")
+        create_docker_compose || return 1
+        start_n8n_docker || return 1
+        create_systemd_service || return 1
+        ;;
+    "migrate")
+        ui_status "info" "Migration sẽ được implement trong version tiếp theo"
+        return 1
+        ;;
+    esac
+
+    # Step 6: Verification
+    if verify_installation; then
+        show_post_install_guide
+        config_set "n8n.installed" "true"
+        config_set "n8n.installed_date" "$(date -Iseconds)"
+        ui_status "success" "🎉 Cài đặt N8N hoàn tất!"
+    else
+        ui_status "error" "Cài đặt chưa hoàn toàn thành công"
+        return 1
+    fi
+
+    trap - ERR
+    return 0
+}
+
+# ===== HELPER FUNCTIONS =====
+
 create_systemd_service() {
-    log_info "🔧 Đang tạo systemd service..."
-
-    sudo tee /etc/systemd/system/n8n.service >/dev/null <<'EOF'
+    ui_run_command "Tạo systemd service" "sudo tee /etc/systemd/system/n8n.service > /dev/null << 'EOF'
 [Unit]
 Description=N8N Workflow Automation
 Requires=docker.service
@@ -522,267 +696,36 @@ ExecReload=/usr/bin/docker compose restart
 [Install]
 WantedBy=multi-user.target
 EOF
-
-    # Reload systemd và enable service
-    sudo systemctl daemon-reload
-    sudo systemctl enable n8n.service
-
-    log_success "✅ Đã tạo systemd service"
+sudo systemctl daemon-reload && sudo systemctl enable n8n.service"
 }
 
-# ===== PHẦN 7: KIỂM TRA CÀI ĐẶT =====
-
-# Health check sau khi cài đặt
-verify_installation() {
-    log_info "🏥 Đang kiểm tra cài đặt..."
-
-    local errors=0
-
-    # Kiểm tra Docker containers
-    if [[ "$INSTALL_TYPE" == "docker" ]]; then
-        log_info "Kiểm tra Docker containers..."
-
-        local containers=("n8n" "n8n-postgres")
-        for container in "${containers[@]}"; do
-            if sudo docker ps --format "table {{.Names}}" | grep -q "^$container$"; then
-                log_success "✅ Container $container đang chạy"
-            else
-                log_error "❌ Container $container không chạy"
-                ((errors++))
-            fi
-        done
-    fi
-
-    # Kiểm tra n8n API
-    log_info "Kiểm tra N8N API..."
-    if curl -s "http://localhost:$N8N_PORT/healthz" >/dev/null 2>&1; then
-        log_success "✅ N8N API hoạt động bình thường"
-    else
-        log_error "❌ N8N API không phản hồi"
-        ((errors++))
-    fi
-
-    # Kiểm tra database connection
-    if [[ "$INSTALL_TYPE" == "docker" ]]; then
-        log_info "Kiểm tra kết nối PostgreSQL..."
-        if sudo docker exec n8n-postgres pg_isready -U n8n >/dev/null 2>&1; then
-            log_success "✅ PostgreSQL hoạt động bình thường"
-        else
-            log_error "❌ PostgreSQL không hoạt động"
-            ((errors++))
-        fi
-    fi
-
-    # Hiển thị thông tin truy cập
-    echo ""
-    log_info "📋 THÔNG TIN TRUY CẬP N8N:"
-    echo "════════════════════════════════════════"
-    echo "   URL: http://localhost:$N8N_PORT"
-    [[ -n "$N8N_DOMAIN" ]] && echo "   Domain: https://$N8N_DOMAIN"
-    echo "   Username: admin"
-    echo "   Password: changeme"
-    echo "   ⚠️  QUAN TRỌNG: Hãy đổi password ngay!"
-    echo "════════════════════════════════════════"
-    echo ""
-
-    if [[ $errors -eq 0 ]]; then
-        log_success "✅ Kiểm tra hoàn tất - Tất cả đều hoạt động tốt!"
-        return 0
-    else
-        log_error "❌ Phát hiện $errors lỗi trong quá trình kiểm tra"
-        return 1
-    fi
-}
-
-# ===== PHẦN 8: CHỨC NĂNG MIGRATION =====
-
-# Migration từ n8n instance cũ
-migrate_from_existing() {
-    log_info "🔄 MIGRATION TỪ N8N HIỆN CÓ"
-    echo ""
-
-    # Thu thập thông tin về instance cũ
-    log_info "Vui lòng cung cấp thông tin về n8n hiện tại:"
-    echo ""
-
-    read -p "N8N hiện tại chạy trên Docker? [Y/n]: " is_docker
-    local source_type="native"
-    [[ ! "$is_docker" =~ ^[Nn]$ ]] && source_type="docker"
-
-    read -p "Đường dẫn data n8n (mặc định ~/.n8n): " source_path
-    source_path=${source_path:-"$HOME/.n8n"}
-
-    if [[ ! -d "$source_path" ]]; then
-        log_error "Không tìm thấy thư mục data: $source_path"
-        return 1
-    fi
-
-    # Backup data cũ
-    log_info "📦 Đang backup data hiện tại..."
-    local backup_name="n8n-backup-$(date +%Y%m%d-%H%M%S)"
-    local backup_path="/tmp/$backup_name"
-
-    cp -r "$source_path" "$backup_path"
-    log_success "✅ Đã backup vào: $backup_path"
-
-    # Cài đặt n8n mới
-    log_info "🚀 Đang cài đặt n8n mới với Docker..."
-    INSTALL_TYPE="docker"
-
-    if ! collect_configuration; then
-        return 1
-    fi
-
-    create_docker_compose
-    start_n8n_docker
-
-    # Restore data
-    log_info "📥 Đang restore data..."
-    sudo docker compose -f /opt/n8n/docker-compose.yml down
-
-    # Copy data files
-    sudo cp -r "$backup_path"/* "/var/lib/docker/volumes/n8n_n8n_data/_data/"
-    sudo chown -R 1000:1000 "/var/lib/docker/volumes/n8n_n8n_data/_data/"
-
-    # Restart n8n
-    sudo docker compose -f /opt/n8n/docker-compose.yml up -d
-
-    log_success "✅ Migration hoàn tất!"
-
-    verify_installation
-}
-
-# ===== PHẦN 9: UTILITY FUNCTIONS =====
-
-# Hiển thị hướng dẫn sau cài đặt
-show_post_install_guide() {
-    echo ""
-    log_info "📚 HƯỚNG DẪN SAU CÀI ĐẶT"
-    echo "════════════════════════════════════════"
-    echo ""
-    echo "1. ĐỔI MẬT KHẨU ADMIN:"
-    echo "   - Truy cập N8N"
-    echo "   - Vào Settings > Users"
-    echo "   - Đổi password cho user admin"
-    echo ""
-    echo "2. CẤU HÌNH NGINX (nếu có domain):"
-    echo "   - Chạy: sudo nano /etc/nginx/sites-available/n8n"
-    echo "   - Cấu hình reverse proxy"
-    echo "   - Enable SSL với Let's Encrypt"
-    echo ""
-    echo "3. BACKUP TỰ ĐỘNG:"
-    echo "   - Backup được lưu tại: /opt/n8n/backups"
-    echo "   - Thiết lập cron job cho backup định kỳ"
-    echo ""
-    echo "4. MONITORING:"
-    echo "   - Logs: sudo docker compose -f /opt/n8n/docker-compose.yml logs -f"
-    echo "   - Stats: sudo docker stats"
-    echo ""
-    echo "5. QUẢN LÝ SERVICE:"
-    echo "   - Start: sudo systemctl start n8n"
-    echo "   - Stop: sudo systemctl stop n8n"
-    echo "   - Restart: sudo systemctl restart n8n"
-    echo "   - Status: sudo systemctl status n8n"
-    echo ""
-    echo "════════════════════════════════════════"
-}
-
-# Rollback khi có lỗi
 rollback_installation() {
-    log_warn "⚠️  Đang rollback cài đặt do có lỗi..."
+    ui_status "warning" "Đang rollback cài đặt..."
 
-    if [[ "$INSTALL_TYPE" == "docker" ]]; then
-        # Stop và remove containers
-        if [[ -f "/opt/n8n/docker-compose.yml" ]]; then
-            cd /opt/n8n
-            sudo docker compose down -v
-        fi
-
-        # Remove systemd service
-        if [[ -f "/etc/systemd/system/n8n.service" ]]; then
-            sudo systemctl disable n8n.service
-            sudo rm -f /etc/systemd/system/n8n.service
-            sudo systemctl daemon-reload
-        fi
-
-        # Remove config directory
-        sudo rm -rf /opt/n8n
+    if [[ -f "/opt/n8n/docker-compose.yml" ]]; then
+        cd /opt/n8n && sudo docker compose down -v || true
     fi
 
-    log_info "Đã rollback các thay đổi"
+    sudo rm -rf /opt/n8n || true
+    sudo rm -f /etc/systemd/system/n8n.service || true
+    sudo systemctl daemon-reload || true
+
+    ui_status "info" "Rollback hoàn tất"
 }
 
-# ===== MAIN FUNCTION - ĐIỀU PHỐI QUÁ TRÌNH CÀI ĐẶT =====
+show_post_install_guide() {
+    ui_info_box "Hướng dẫn sau cài đặt" \
+        "1. Đổi mật khẩu admin ngay" \
+        "2. Cấu hình domain và SSL (nếu có)" \
+        "3. Thiết lập backup tự động" \
+        "4. Kiểm tra firewall cho port 80/443"
 
-# Hàm chính của plugin
-install_n8n_main() {
-    log_info "🚀 BẮT ĐẦU CÀI ĐẶT N8N"
-    echo ""
-
-    # Bước 1: Kiểm tra hệ thống
-    if ! check_n8n_requirements; then
-        log_error "Hệ thống không đáp ứng yêu cầu tối thiểu"
-        return 1
-    fi
-
-    echo ""
-    read -p "Tiếp tục cài đặt? [Y/n]: " confirm
-    [[ "$confirm" =~ ^[Nn]$ ]] && return 0
-
-    # Bước 2: Chọn phương thức cài đặt
-    if ! show_install_method_menu; then
-        return 0
-    fi
-
-    # Trap để rollback khi có lỗi
-    trap rollback_installation ERR
-
-    # Bước 3: Xử lý theo phương thức đã chọn
-    case "$INSTALL_TYPE" in
-    "docker")
-        # Cài đặt dependencies
-        install_dependencies
-        install_docker
-
-        # Thu thập cấu hình
-        if ! collect_configuration; then
-            return 1
-        fi
-
-        # Tạo và khởi động n8n
-        create_docker_compose
-        start_n8n_docker
-        create_systemd_service
-        ;;
-
-    "native")
-        log_warn "⚠️  Cài đặt Native chưa được implement trong phiên bản này"
-        log_info "Vui lòng chọn cài đặt Docker"
-        return 1
-        ;;
-
-    "migrate")
-        migrate_from_existing
-        ;;
-    esac
-
-    # Bước 4: Verify installation
-    if verify_installation; then
-        show_post_install_guide
-
-        # Lưu trạng thái cài đặt
-        config_set "n8n.installed" "true"
-        config_set "n8n.installed_date" "$(date -Iseconds)"
-    else
-        log_error "Cài đặt không thành công hoàn toàn"
-        return 1
-    fi
-
-    # Remove trap
-    trap - ERR
-
-    return 0
+    ui_info_box "Quản lý service" \
+        "Start: sudo systemctl start n8n" \
+        "Stop: sudo systemctl stop n8n" \
+        "Restart: sudo systemctl restart n8n" \
+        "Logs: sudo docker compose -f /opt/n8n/docker-compose.yml logs -f"
 }
 
-# Export function để manager.sh có thể gọi
+# Export main function
 export -f install_n8n_main

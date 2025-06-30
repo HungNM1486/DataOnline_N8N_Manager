@@ -14,6 +14,8 @@ readonly PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 source "$PROJECT_ROOT/src/core/logger.sh"
 source "$PROJECT_ROOT/src/core/config.sh"
 source "$PROJECT_ROOT/src/core/utils.sh"
+source "$PROJECT_ROOT/src/core/ui.sh"
+source "$PROJECT_ROOT/src/core/spinner.sh"
 
 # Thông tin ứng dụng
 readonly APP_NAME="$(config_get "app.name")"
@@ -118,9 +120,182 @@ handle_installation() {
 
 # Xử lý quản lý domain
 handle_domain_management() {
+    echo ""
     log_info "QUẢN LÝ TÊN MIỀN & SSL"
     echo ""
-    log_info "Tính năng này sẽ sớm có sẵn..."
+
+    # Kiểm tra n8n đã được cài đặt
+    if ! is_n8n_installed; then
+        log_error "N8N chưa được cài đặt. Vui lòng cài đặt N8N trước."
+        return 1
+    fi
+
+    # Menu quản lý domain
+    echo "1) Cấu hình SSL với Let's Encrypt"
+    echo "2) Kiểm tra trạng thái SSL"
+    echo "3) Gia hạn chứng chỉ SSL"
+    echo "4) Chẩn đoán vấn đề SSL"
+    echo "0) Quay lại"
+    echo ""
+
+    read -p "Chọn [0-4]: " domain_choice
+
+    case "$domain_choice" in
+    1)
+        # Source plugin SSL
+        local ssl_plugin="$PROJECT_ROOT/src/plugins/ssl/main.sh"
+        if [[ -f "$ssl_plugin" ]]; then
+            source "$ssl_plugin"
+            # Gọi hàm main của plugin
+            setup_ssl_main
+        else
+            log_error "Không tìm thấy plugin SSL"
+            log_info "Đường dẫn: $ssl_plugin"
+        fi
+        ;;
+    2)
+        check_ssl_status
+        ;;
+    3)
+        renew_ssl_certificate
+        ;;
+    4)
+        # Chẩn đoán vấn đề SSL
+        local ssl_plugin="$PROJECT_ROOT/src/plugins/ssl/main.sh"
+        if [[ -f "$ssl_plugin" ]]; then
+            source "$ssl_plugin"
+
+            # Lấy domain từ config hoặc người dùng
+            local domain
+            domain=$(config_get "n8n.domain")
+            if [[ -z "$domain" ]]; then
+                echo -n -e "${LOG_WHITE}Nhập tên miền để chẩn đoán: ${LOG_NC}"
+                read -r domain
+
+                if [[ -z "$domain" ]]; then
+                    log_error "Domain không được để trống"
+                    return 1
+                fi
+            fi
+
+            # Gọi hàm debug
+            debug_ssl_setup "$domain"
+        else
+            log_error "Không tìm thấy plugin SSL"
+            log_info "Đường dẫn: $ssl_plugin"
+        fi
+        ;;
+    0)
+        return
+        ;;
+    *)
+        log_error "Lựa chọn không hợp lệ: $domain_choice"
+        ;;
+    esac
+}
+
+# Kiểm tra N8N đã cài đặt chưa
+is_n8n_installed() {
+    # Kiểm tra qua docker hoặc dịch vụ
+    if command_exists docker && docker ps --format '{{.Names}}' | grep -q "n8n"; then
+        return 0 # N8N đã được cài đặt
+    elif is_service_running "n8n"; then
+        return 0 # N8N đã được cài đặt
+    else
+        return 1 # N8N chưa được cài đặt
+    fi
+}
+
+# Kiểm tra trạng thái SSL
+check_ssl_status() {
+    echo ""
+    log_info "KIỂM TRA TRẠNG THÁI SSL"
+    echo ""
+
+    # Kiểm tra domain từ cấu hình
+    local domain
+    domain=$(config_get "n8n.domain")
+
+    if [[ -z "$domain" ]]; then
+        log_error "Chưa cấu hình domain trong hệ thống"
+        echo -n -e "${LOG_WHITE}Nhập tên miền để kiểm tra: ${LOG_NC}"
+        read -r domain
+
+        if [[ -z "$domain" ]]; then
+            log_error "Domain không được để trống"
+            return 1
+        fi
+    fi
+
+    log_info "Đang kiểm tra SSL cho domain: $domain"
+
+    # Kiểm tra nginx config
+    if [[ -f "/etc/nginx/sites-available/${domain}.conf" ]]; then
+        log_success "✅ Cấu hình Nginx cho $domain đã tồn tại"
+    else
+        log_error "❌ Không tìm thấy cấu hình Nginx cho $domain"
+    fi
+
+    # Kiểm tra chứng chỉ Let's Encrypt
+    if [[ -d "/etc/letsencrypt/live/$domain" ]]; then
+        log_success "✅ Chứng chỉ SSL đã được cài đặt"
+
+        # Kiểm tra ngày hết hạn
+        local expiry_date
+        expiry_date=$(openssl x509 -in "/etc/letsencrypt/live/$domain/cert.pem" -noout -enddate | cut -d= -f2)
+        local expiry_epoch
+        expiry_epoch=$(date -d "$expiry_date" +%s)
+        local now_epoch
+        now_epoch=$(date +%s)
+        local days_remaining
+        days_remaining=$(((expiry_epoch - now_epoch) / 86400))
+
+        if [[ $days_remaining -gt 30 ]]; then
+            log_success "✅ SSL còn $days_remaining ngày trước khi hết hạn"
+        elif [[ $days_remaining -gt 0 ]]; then
+            log_warning "⚠️ SSL sẽ hết hạn trong $days_remaining ngày! Cần gia hạn sớm."
+        else
+            log_error "❌ SSL đã hết hạn! Cần gia hạn ngay."
+        fi
+    else
+        log_error "❌ Không tìm thấy chứng chỉ SSL cho $domain"
+    fi
+
+    # Kiểm tra HTTPS
+    if command_exists curl; then
+        if curl -s -o /dev/null -w "%{http_code}" "https://$domain" | grep -q "200\|301\|302"; then
+            log_success "✅ HTTPS hoạt động bình thường (https://$domain)"
+        else
+            log_error "❌ HTTPS không hoạt động (https://$domain)"
+        fi
+    fi
+}
+
+# Gia hạn chứng chỉ SSL
+renew_ssl_certificate() {
+    echo ""
+    log_info "GIA HẠN CHỨNG CHỈ SSL"
+    echo ""
+
+    if ! command_exists certbot; then
+        log_error "Certbot chưa được cài đặt"
+        return 1
+    fi
+
+    log_info "Đang thực hiện gia hạn SSL..."
+
+    if certbot renew; then
+        log_success "✅ Gia hạn SSL thành công"
+
+        # Khởi động lại Nginx
+        if systemctl is-active --quiet nginx; then
+            systemctl reload nginx
+            log_success "✅ Đã khởi động lại Nginx"
+        fi
+    else
+        log_error "❌ Gia hạn SSL thất bại"
+        log_info "Kiểm tra logs: /var/log/letsencrypt/"
+    fi
 }
 
 # Xử lý quản lý dịch vụ
@@ -277,10 +452,10 @@ show_help() {
 
     echo "════════════════════════════════════════"
     echo "Liên hệ hỗ trợ:"
-    echo "  • Website: https://datalonline.vn"
-    echo "  • Tài liệu: https://docs.datalonline.vn/n8n-manager"
-    echo "  • Hỗ trợ: support@datalonline.vn"
-    echo "  • GitHub: https://github.com/datalonline-vn/n8n-manager"
+    echo "  • Website: https://dataonline.vn"
+    echo "  • Tài liệu: https://docs.dataonline.vn/n8n-manager"
+    echo "  • Hỗ trợ: support@dataonline.vn"
+    echo "  • GitHub: https://github.com/dataonline-vn/n8n-manager"
     echo ""
     echo "Phím tắt:"
     echo "  • Ctrl+C: Thoát khẩn cấp"
