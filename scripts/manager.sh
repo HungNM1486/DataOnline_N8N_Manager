@@ -134,7 +134,6 @@ handle_domain_management() {
     echo "1) Cấu hình SSL với Let's Encrypt"
     echo "2) Kiểm tra trạng thái SSL"
     echo "3) Gia hạn chứng chỉ SSL"
-    echo "4) Chẩn đoán vấn đề SSL"
     echo "0) Quay lại"
     echo ""
 
@@ -158,32 +157,6 @@ handle_domain_management() {
         ;;
     3)
         renew_ssl_certificate
-        ;;
-    4)
-        # Chẩn đoán vấn đề SSL
-        local ssl_plugin="$PROJECT_ROOT/src/plugins/ssl/main.sh"
-        if [[ -f "$ssl_plugin" ]]; then
-            source "$ssl_plugin"
-
-            # Lấy domain từ config hoặc người dùng
-            local domain
-            domain=$(config_get "n8n.domain")
-            if [[ -z "$domain" ]]; then
-                echo -n -e "${LOG_WHITE}Nhập tên miền để chẩn đoán: ${LOG_NC}"
-                read -r domain
-
-                if [[ -z "$domain" ]]; then
-                    log_error "Domain không được để trống"
-                    return 1
-                fi
-            fi
-
-            # Gọi hàm debug
-            debug_ssl_setup "$domain"
-        else
-            log_error "Không tìm thấy plugin SSL"
-            log_info "Đường dẫn: $ssl_plugin"
-        fi
         ;;
     0)
         return

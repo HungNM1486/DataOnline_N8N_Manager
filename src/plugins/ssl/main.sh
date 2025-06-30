@@ -57,11 +57,21 @@ create_nginx_ssl_config() {
     local n8n_port="${2:-5678}"
     local nginx_conf="/etc/nginx/sites-available/${domain}.conf"
 
-    ui_run_command "Tạo cấu hình Nginx cho $domain" "
+    ui_section "Tạo cấu hình Nginx SSL"
+
+    # Step 1: Create webroot directory
+    if ! ui_run_command "Tạo webroot directory" "
         mkdir -p $WEBROOT_PATH/.well-known/acme-challenge
         chown www-data:www-data $WEBROOT_PATH -R
-        
-        cat > $nginx_conf << EOF
+        chmod 755 $WEBROOT_PATH -R
+    "; then
+        return 1
+    fi
+
+    # Step 2: Create nginx config file
+    ui_start_spinner "Tạo file cấu hình Nginx"
+
+    cat >"$nginx_conf" <<EOF
 server {
     listen 80;
     server_name $domain;
@@ -88,14 +98,14 @@ server {
 
     client_max_body_size 100M;
     
-    add_header X-Frame-Options \"SAMEORIGIN\" always;
-    add_header X-XSS-Protection \"1; mode=block\" always;
-    add_header X-Content-Type-Options \"nosniff\" always;
-    add_header Referrer-Policy \"strict-origin-when-cross-origin\" always;
-    add_header Strict-Transport-Security \"max-age=31536000; includeSubDomains; preload\" always;
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
 
-    access_log /var/log/nginx/\$host.access.log;
-    error_log /var/log/nginx/\$host.error.log;
+    access_log /var/log/nginx/$domain.access.log;
+    error_log /var/log/nginx/$domain.error.log;
 
     location / {
         proxy_pass http://127.0.0.1:$n8n_port;
@@ -119,10 +129,53 @@ server {
     }
 }
 EOF
-        
+
+    ui_stop_spinner
+
+    # Step 3: Verify config file was created
+    if [[ ! -f "$nginx_conf" ]]; then
+        ui_status "error" "Không thể tạo file config: $nginx_conf"
+        return 1
+    fi
+
+    # Step 4: Verify config file has content
+    if [[ ! -s "$nginx_conf" ]]; then
+        ui_status "error" "File config trống: $nginx_conf"
+        return 1
+    fi
+
+    ui_status "success" "Đã tạo file cấu hình: $nginx_conf ($(wc -l <"$nginx_conf") dòng)"
+
+    # Step 5: Enable site
+    if ! ui_run_command "Enable nginx site" "
         ln -sf $nginx_conf /etc/nginx/sites-enabled/
-        nginx -t && systemctl reload nginx
-    "
+    "; then
+        return 1
+    fi
+
+    # Step 6: Test nginx config
+    if ! ui_run_command "Test nginx configuration" "nginx -t"; then
+        ui_status "error" "Nginx config có lỗi, removing site"
+        rm -f "/etc/nginx/sites-enabled/$(basename $nginx_conf)"
+        return 1
+    fi
+
+    # Step 7: Reload nginx
+    if ! ui_run_command "Reload nginx" "systemctl reload nginx"; then
+        return 1
+    fi
+
+    # Step 8: Verify nginx is listening on 443
+    sleep 2
+    if ss -tlpn | grep -q ":443"; then
+        ui_status "success" "Nginx đang listen trên port 443"
+    else
+        ui_status "warning" "Nginx chưa listen trên port 443, kiểm tra logs"
+        tail -n 5 /var/log/nginx/error.log | sed 's/^/  /'
+        return 1
+    fi
+
+    return 0
 }
 
 verify_ssl_setup() {
