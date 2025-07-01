@@ -48,6 +48,7 @@ show_main_menu() {
     echo -e "3️⃣  ⚙️  Quản lý dịch vụ"
     echo -e "4️⃣  💾 Sao lưu & khôi phục"
     echo -e "5️⃣  🔄 Cập nhật phiên bản"
+    echo -e "6️⃣  📊 NocoDB Database Manager"
     echo ""
     echo -e "${LOG_WHITE}HỖ TRỢ:${LOG_NC}"
     echo -e "A️⃣  📋 Thông tin hệ thống"
@@ -65,33 +66,16 @@ handle_selection() {
     local choice="$1"
 
     case "$choice" in
-    1)
-        handle_installation
-        ;;
-    2)
-        handle_domain_management
-        ;;
-    3)
-        handle_service_management
-        ;;
-    4)
-        handle_backup_restore
-        ;;
-    5)
-        handle_updates
-        ;;
-    A | a)
-        show_system_info
-        ;;
-    B | b)
-        show_configuration_menu
-        ;;
-    C | c)
-        show_help
-        ;;
-    D | d)
-        toggle_debug_mode
-        ;;
+    1) handle_installation ;;
+    2) handle_domain_management ;;
+    3) handle_service_management ;;
+    4) handle_backup_restore ;;
+    5) handle_updates ;;
+    6) handle_nocodb_management ;;
+    A | a) show_system_info ;;
+    B | b) show_configuration_menu ;;
+    C | c) show_help ;;
+    D | d) toggle_debug_mode ;;
     0)
         log_success "Cảm ơn bạn đã sử dụng DataOnline N8N Manager!"
         exit 0
@@ -311,6 +295,23 @@ handle_updates() {
         upgrade_n8n_main
     else
         log_error "Không tìm thấy upgrade plugin"
+        return 1
+    fi
+}
+
+# Xử lý NocoDB management
+handle_nocodb_management() {
+    # Source NocoDB plugin
+    local nocodb_plugin="$PROJECT_ROOT/src/plugins/nocodb/main.sh"
+
+    if [[ -f "$nocodb_plugin" ]]; then
+        source "$nocodb_plugin"
+        # Gọi menu chính NocoDB
+        nocodb_main_menu
+    else
+        log_error "Không tìm thấy NocoDB plugin"
+        log_info "Đường dẫn: $nocodb_plugin"
+        log_info "Vui lòng kiểm tra plugin đã được cài đặt"
         return 1
     fi
 }
