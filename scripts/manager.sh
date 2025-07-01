@@ -37,9 +37,9 @@ init_app() {
 show_main_menu() {
     clear
     echo -e "${LOG_CYAN}╭──────────────────────────────────────────────────────────╮${LOG_NC}"
-    echo -e "${LOG_CYAN}│                $APP_NAME                     │${LOG_NC}"
-    echo -e "${LOG_CYAN}│                Phiên bản phát triển v$APP_VERSION                │${LOG_NC}"
-    echo -e "${LOG_CYAN}│                   https://datalonline.vn                 │${LOG_NC}"
+    echo -e "${LOG_CYAN}│                $APP_NAME                    │${LOG_NC}"
+    echo -e "${LOG_CYAN}│              Phiên bản phát triển v$APP_VERSION    b              │${LOG_NC}"
+    echo -e "${LOG_CYAN}│                https://datalonline.vn                    │${LOG_NC}"
     echo -e "${LOG_CYAN}╰──────────────────────────────────────────────────────────╯${LOG_NC}"
     echo ""
     echo -e "${LOG_WHITE}CHỨC NĂNG CHÍNH:${LOG_NC}"
@@ -275,7 +275,7 @@ renew_ssl_certificate() {
 handle_service_management() {
     # Source service management plugin
     local service_plugin="$PROJECT_ROOT/src/plugins/service-management/main.sh"
-    
+
     if [[ -f "$service_plugin" ]]; then
         source "$service_plugin"
         service_management_main
@@ -305,7 +305,7 @@ handle_backup_restore() {
 handle_updates() {
     # Source upgrade plugin
     local upgrade_plugin="$PROJECT_ROOT/src/plugins/upgrade/main.sh"
-    
+
     if [[ -f "$upgrade_plugin" ]]; then
         source "$upgrade_plugin"
         upgrade_n8n_main
