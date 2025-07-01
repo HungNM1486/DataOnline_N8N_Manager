@@ -273,14 +273,16 @@ renew_ssl_certificate() {
 
 # Xử lý quản lý dịch vụ
 handle_service_management() {
-    log_info "QUẢN LÝ DỊCH VỤ"
-    echo ""
-
-    echo "Các dịch vụ có sẵn:"
-    echo "• N8N: $(is_service_running "n8n" && echo "Đang chạy ✅" || echo "Đã dừng ❌")"
-    echo "• Nginx: $(is_service_running "nginx" && echo "Đang chạy ✅" || echo "Đã dừng ❌")"
-    echo "• Docker: $(is_service_running "docker" && echo "Đang chạy ✅" || echo "Đã dừng ❌")"
-    echo ""
+    # Source service management plugin
+    local service_plugin="$PROJECT_ROOT/src/plugins/service-management/main.sh"
+    
+    if [[ -f "$service_plugin" ]]; then
+        source "$service_plugin"
+        service_management_main
+    else
+        log_error "Không tìm thấy service management plugin"
+        return 1
+    fi
 }
 
 # Xử lý backup & restore
@@ -301,10 +303,16 @@ handle_backup_restore() {
 
 # Xử lý updates
 handle_updates() {
-    log_info "CẬP NHẬT PHIÊN BẢN"
-    echo ""
-    log_info "Phiên bản hiện tại: $APP_VERSION"
-    log_info "Tính năng này sẽ sớm có sẵn..."
+    # Source upgrade plugin
+    local upgrade_plugin="$PROJECT_ROOT/src/plugins/upgrade/main.sh"
+    
+    if [[ -f "$upgrade_plugin" ]]; then
+        source "$upgrade_plugin"
+        upgrade_n8n_main
+    else
+        log_error "Không tìm thấy upgrade plugin"
+        return 1
+    fi
 }
 
 # Thông tin hệ thống nâng cao
