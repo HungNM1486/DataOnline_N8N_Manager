@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# DataOnline N8N Manager - NocoDB Integration Plugin
-# Phiên bản: 1.0.0
+# DataOnline N8N Manager - NocoDB N8N Data Manager
+# Phiên bản: 2.0.0
 
 set -euo pipefail
 
@@ -16,18 +16,19 @@ PLUGIN_PROJECT_ROOT="$(dirname "$(dirname "$PLUGIN_DIR")")"
 
 readonly NOCODB_LOADED=true
 readonly NOCODB_DIR="/opt/nocodb"
-readonly NOCODB_PORT="8080"
+readonly DEFAULT_PORT="8080"
+readonly BACKUP_DIR="/opt/n8n/backups/nocodb"
 
-# ===== MAIN MENU =====
+# ===== CORE FUNCTIONS =====
 
 nocodb_main_menu() {
     while true; do
-        ui_header "NocoDB Database Manager"
+        ui_header "NocoDB - N8N Data Manager"
 
-        if [[ ! -f "$NOCODB_DIR/docker-compose.yml" ]]; then
-            show_install_menu
-        else
+        if is_nocodb_installed; then
             show_management_menu
+        else
+            show_install_menu
         fi
 
         echo ""
@@ -35,11 +36,15 @@ nocodb_main_menu() {
     done
 }
 
+is_nocodb_installed() {
+    [[ -f "$NOCODB_DIR/docker-compose.yml" ]]
+}
+
 show_install_menu() {
-    echo "🚀 Cài đặt NocoDB"
+    echo "🚀 Cài đặt NocoDB cho N8N"
     echo ""
-    echo "1) 📊 Cài đặt với kết nối N8N database"
-    echo "2) 🔧 Cài đặt standalone"
+    echo "1) 📊 Cài đặt với quyền đầy đủ (cho admin)"
+    echo "2) 👁️  Cài đặt chế độ chỉ xem (an toàn)"
     echo "0) ❌ Quay lại"
     echo ""
 
@@ -47,8 +52,8 @@ show_install_menu() {
     read -r choice
 
     case "$choice" in
-    1) install_nocodb_with_n8n ;;
-    2) install_nocodb_standalone ;;
+    1) install_nocodb_full_access ;;
+    2) install_nocodb_readonly ;;
     0) return ;;
     *) ui_status "error" "Lựa chọn không hợp lệ" ;;
     esac
@@ -59,405 +64,563 @@ show_management_menu() {
     echo "Trạng thái: $status"
     echo ""
     echo "1) 🌐 Thông tin truy cập"
-    echo "2) 👥 Quản lý người dùng"
-    echo "3) 🔄 Restart service"
-    echo "4) 📝 Xem logs"
-    echo "5) ⚙️  Cấu hình"
-    echo "6) 🗑️  Gỡ cài đặt"
+    echo "2) 👥 Quản lý quyền truy cập"
+    echo "3) 📚 Hướng dẫn sử dụng N8N tables"
+    echo "4) 💾 Backup data trước khi sửa"
+    echo "5) 🔄 Restart service"
+    echo "6) 📝 Xem logs"
+    echo "7) 🗑️  Gỡ cài đặt"
     echo "0) ❌ Quay lại"
     echo ""
 
-    echo -n -e "${UI_WHITE}Chọn [0-6]: ${UI_NC}"
+    echo -n -e "${UI_WHITE}Chọn [0-7]: ${UI_NC}"
     read -r choice
 
     case "$choice" in
     1) show_access_info ;;
-    2) manage_users ;;
-    3) restart_nocodb ;;
-    4) show_logs ;;
-    5) configure_nocodb ;;
-    6) uninstall_nocodb ;;
+    2) manage_access_permissions ;;
+    3) show_n8n_tables_guide ;;
+    4) backup_n8n_data ;;
+    5) restart_nocodb ;;
+    6) show_logs ;;
+    7) uninstall_nocodb ;;
     0) return ;;
     *) ui_status "error" "Lựa chọn không hợp lệ" ;;
     esac
 }
 
-# ===== INSTALLATION =====
+# ===== VALIDATION FUNCTIONS =====
 
-install_nocodb_with_n8n() {
-    ui_section "Cài đặt NocoDB với N8N Database"
+validate_domain() {
+    local domain="$1"
+    if [[ ! "$domain" =~ ^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$ ]]; then
+        ui_status "error" "Domain format không hợp lệ"
+        return 1
+    fi
+    return 0
+}
 
+validate_port() {
+    local port="$1"
+    if [[ ! "$port" =~ ^[0-9]+$ ]] || [[ "$port" -lt 1024 ]] || [[ "$port" -gt 65535 ]]; then
+        ui_status "error" "Port không hợp lệ (1024-65535)"
+        return 1
+    fi
+    if ! is_port_available "$port"; then
+        ui_status "error" "Port $port đã được sử dụng"
+        return 1
+    fi
+    return 0
+}
+
+# ===== INSTALLATION FUNCTIONS =====
+
+install_nocodb_full_access() {
+    ui_section "Cài đặt NocoDB với quyền đầy đủ"
+
+    ui_warning_box "⚠️ CẢNH BÁO" \
+        "Chế độ này cho phép CHỈNH SỬA data N8N" \
+        "Chỉ dành cho admin có kinh nghiệm" \
+        "Sai thao tác có thể làm hỏng N8N!"
+
+    if ! ui_confirm "Bạn chắc chắn muốn cài đặt với quyền đầy đủ?"; then
+        return
+    fi
+
+    config_set "nocodb.access_mode" "full"
+    install_nocodb_with_n8n_db
+}
+
+install_nocodb_readonly() {
+    ui_section "Cài đặt NocoDB chế độ chỉ xem"
+
+    ui_info_box "ℹ️ Chế độ an toàn" \
+        "Chỉ có thể XEM data, không thể sửa" \
+        "Phù hợp cho monitoring và báo cáo"
+
+    config_set "nocodb.access_mode" "readonly"
+    install_nocodb_with_n8n_db
+}
+
+install_nocodb_with_n8n_db() {
     # Check N8N installation
     if [[ ! -f "/opt/n8n/docker-compose.yml" ]]; then
         ui_status "error" "N8N chưa được cài đặt"
         return 1
     fi
 
-    # Get current domain
-    local n8n_domain=$(config_get "n8n.domain" "")
-    if [[ -z "$n8n_domain" ]]; then
-        ui_status "error" "N8N domain chưa được cấu hình"
+    # Get configuration
+    local domain port
+
+    echo -n -e "${UI_WHITE}Nhập domain cho NocoDB: ${UI_NC}"
+    read -r domain
+    if ! validate_domain "$domain"; then
         return 1
     fi
 
-    ui_info_box "Cài đặt NocoDB" \
-        "Domain: https://$n8n_domain/nocodb" \
-        "Database: N8N PostgreSQL" \
-        "Authentication: Basic Auth"
-
-    if ! ui_confirm "Tiếp tục cài đặt?"; then
-        return
-    fi
-
-    # Install steps
-    if ! create_nocodb_docker_config; then
-        ui_status "error" "Tạo Docker config thất bại"
+    echo -n -e "${UI_WHITE}Port NocoDB ($DEFAULT_PORT): ${UI_NC}"
+    read -r port
+    port=${port:-$DEFAULT_PORT}
+    if ! validate_port "$port"; then
         return 1
     fi
 
-    if ! setup_nginx_subdirectory "$n8n_domain"; then
-        ui_status "error" "Cấu hình Nginx thất bại"
-        return 1
-    fi
-
-    if ! create_database_user; then
-        ui_status "error" "Tạo database user thất bại"
-        return 1
-    fi
-
-    if ! start_nocodb_service; then
-        ui_status "error" "Khởi động service thất bại"
+    # Check prerequisites
+    if ! check_prerequisites; then
         return 1
     fi
 
     # Save config
-    config_set "nocodb.installed" "true"
-    config_set "nocodb.domain" "$n8n_domain"
-    config_set "nocodb.url" "https://$n8n_domain/nocodb"
+    config_set "nocodb.domain" "$domain"
+    config_set "nocodb.port" "$port"
 
-    ui_status "success" "NocoDB đã cài đặt: https://$n8n_domain/nocodb"
+    # Install
+    if ! install_nocodb_components; then
+        ui_status "error" "Cài đặt thất bại"
+        cleanup_failed_installation
+        return 1
+    fi
+
+    ui_status "success" "NocoDB cài đặt thành công!"
     show_access_info
 }
 
-install_nocodb_standalone() {
-    ui_section "Cài đặt NocoDB standalone"
+check_prerequisites() {
+    ui_start_spinner "Kiểm tra yêu cầu"
 
-    create_nocodb_standalone_config
-    start_nocodb_service
+    local errors=0
 
-    local vps_ip=$(get_public_ip)
-    config_set "nocodb.installed" "true"
-    config_set "nocodb.url" "http://$vps_ip:$NOCODB_PORT"
+    # Check Docker
+    if ! command_exists docker; then
+        ui_status "error" "Docker chưa cài đặt"
+        ((errors++))
+    fi
 
-    ui_status "success" "NocoDB đã cài đặt: http://$vps_ip:$NOCODB_PORT"
+    # Check disk space
+    local free_gb=$(df -BG / | awk 'NR==2 {print $4}' | sed 's/G//')
+    if [[ "$free_gb" -lt 2 ]]; then
+        ui_status "error" "Cần ít nhất 2GB dung lượng (hiện có: ${free_gb}GB)"
+        ((errors++))
+    fi
+
+    ui_stop_spinner
+    
+    # Deep cleanup old installations
+    cleanup_old_nocodb_installations
+
+    return $errors
+}
+
+cleanup_old_nocodb_installations() {
+    ui_start_spinner "Dọn dẹp cài đặt cũ..."
+
+    # Stop and remove all NocoDB related containers
+    local containers=$(docker ps -a --format '{{.Names}}' | grep -E "nocodb|nocodb-postgres" || true)
+    if [[ -n "$containers" ]]; then
+        ui_status "info" "Dừng containers cũ..."
+        echo "$containers" | xargs -r docker rm -f 2>/dev/null || true
+    fi
+
+    # Remove all NocoDB volumes
+    local volumes=$(docker volume ls --format '{{.Name}}' | grep -E "nocodb" || true)
+    if [[ -n "$volumes" ]]; then
+        ui_status "info" "Xóa volumes cũ..."
+        echo "$volumes" | xargs -r docker volume rm 2>/dev/null || true
+    fi
+
+    # Remove old directories
+    local old_dirs=("/nocodb-cloud" "/opt/nocodb-db" "$NOCODB_DIR")
+    for dir in "${old_dirs[@]}"; do
+        if [[ -d "$dir" ]]; then
+            ui_status "info" "Xóa thư mục: $dir"
+            rm -rf "$dir" 2>/dev/null || true
+        fi
+    done
+
+    # Clean database users
+    if docker ps --format '{{.Names}}' | grep -q "n8n-postgres"; then
+        ui_status "info" "Dọn dẹp database users..."
+        docker exec n8n-postgres psql -U n8n -d n8n -c "
+            DROP USER IF EXISTS nocodb_readonly;
+            DROP USER IF EXISTS nocodb_full;
+        " 2>/dev/null || true
+    fi
+
+    # Clean all nginx configs
+    cleanup_nginx_configs
+
+    # Remove htpasswd files
+    rm -f /etc/nginx/.htpasswd-nocodb* 2>/dev/null || true
+
+    ui_stop_spinner
+    ui_status "success" "Dọn dẹp hoàn tất"
+}
+
+cleanup_nginx_configs() {
+    local cleaned=0
+    
+    for nginx_conf in /etc/nginx/sites-available/*.conf; do
+        if [[ -f "$nginx_conf" ]] && grep -q "location /nocodb" "$nginx_conf" 2>/dev/null; then
+            ui_status "info" "Dọn dẹp NocoDB config trong: $(basename "$nginx_conf")"
+            
+            # Backup first
+            cp "$nginx_conf" "${nginx_conf}.pre-nocodb-cleanup.$(date +%Y%m%d_%H%M%S)"
+            
+            # Remove nocodb location block
+            sed -i '/# NocoDB subdirectory/,/^$/d' "$nginx_conf" 2>/dev/null || true
+            
+            ((cleaned++))
+        fi
+    done
+    
+    if [[ $cleaned -gt 0 ]]; then
+        systemctl reload nginx 2>/dev/null || true
+    fi
+}
+
+install_nocodb_components() {
+    create_directories || return 1
+    collect_credentials || return 1
+    setup_database_access || return 1
+    create_docker_config || return 1
+    create_basic_auth || return 1
+    configure_nginx || return 1
+    start_services || return 1
+    return 0
+}
+
+# ===== DATABASE ACCESS SETUP =====
+
+setup_database_access() {
+    ui_start_spinner "Cấu hình truy cập database"
+
+    local access_mode=$(config_get "nocodb.access_mode")
+    local n8n_db_password
+
+    # Check if n8n-postgres is running
+    if ! docker ps --format '{{.Names}}' | grep -q "n8n-postgres"; then
+        ui_stop_spinner
+        ui_status "error" "PostgreSQL container không chạy"
+        ui_status "info" "Đang khởi động PostgreSQL..."
+        
+        cd /opt/n8n && docker compose up -d postgres
+        sleep 5
+        
+        if ! docker ps --format '{{.Names}}' | grep -q "n8n-postgres"; then
+            ui_status "error" "Không thể khởi động PostgreSQL"
+            return 1
+        fi
+    fi
+
+    # Get N8N database password
+    if [[ -f "/opt/n8n/.env" ]]; then
+        n8n_db_password=$(grep "POSTGRES_PASSWORD=" /opt/n8n/.env | cut -d'=' -f2)
+    else
+        ui_stop_spinner
+        ui_status "error" "Không tìm thấy N8N database password"
+        return 1
+    fi
+
+    # Create user based on access mode
+    local db_user
+    local sql_commands
+
+    if [[ "$access_mode" == "readonly" ]]; then
+        db_user="nocodb_readonly"
+        sql_commands="
+            -- Drop user if exists
+            DROP USER IF EXISTS $db_user;
+            
+            -- Create readonly user
+            CREATE USER $db_user WITH PASSWORD '$n8n_db_password';
+            
+            -- Grant connect permission
+            GRANT CONNECT ON DATABASE n8n TO $db_user;
+            
+            -- Grant schema usage
+            GRANT USAGE ON SCHEMA public TO $db_user;
+            
+            -- Grant SELECT on all tables
+            GRANT SELECT ON ALL TABLES IN SCHEMA public TO $db_user;
+            
+            -- Grant SELECT on future tables
+            ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO $db_user;
+        "
+    else
+        db_user="nocodb_full"
+        sql_commands="
+            -- Drop user if exists
+            DROP USER IF EXISTS $db_user;
+            
+            -- Create full access user
+            CREATE USER $db_user WITH PASSWORD '$n8n_db_password';
+            
+            -- Grant all privileges
+            GRANT ALL PRIVILEGES ON DATABASE n8n TO $db_user;
+            GRANT ALL PRIVILEGES ON SCHEMA public TO $db_user;
+            GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO $db_user;
+            GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO $db_user;
+            
+            -- Grant for future objects
+            ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO $db_user;
+            ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO $db_user;
+        "
+    fi
+
+    # Debug info
+    ui_stop_spinner
+    ui_status "info" "Đang tạo database user: $db_user"
+
+    # Create temp SQL file to avoid escaping issues
+    local temp_sql="/tmp/nocodb_setup_$.sql"
+    echo "$sql_commands" > "$temp_sql"
+
+    # Execute SQL commands with error output
+    local error_log="/tmp/nocodb_db_error_$.log"
+    if docker exec -i n8n-postgres psql -U n8n -d n8n < "$temp_sql" > "$error_log" 2>&1; then
+        ui_status "success" "Database user $db_user đã được tạo"
+        rm -f "$temp_sql" "$error_log"
+    else
+        ui_status "error" "Không thể tạo database user"
+        echo "Chi tiết lỗi:"
+        cat "$error_log"
+        rm -f "$temp_sql" "$error_log"
+        return 1
+    fi
+
+    config_set "nocodb.db_user" "$db_user"
+    config_set "nocodb.n8n_db_password" "$n8n_db_password"
+    return 0
+}
+
+# ===== CREDENTIALS COLLECTION =====
+
+collect_credentials() {
+    ui_section "Cấu hình thông tin đăng nhập"
+
+    # Basic Auth credentials
+    echo -e "${UI_CYAN}=== Basic Auth (Nginx) ===${UI_NC}"
+
+    local auth_username
+    echo -n -e "${UI_WHITE}Username (nocodb): ${UI_NC}"
+    read -r auth_username
+    auth_username=${auth_username:-nocodb}
+
+    local auth_password
+    while true; do
+        echo -n -e "${UI_WHITE}Password (tối thiểu 8 ký tự): ${UI_NC}"
+        read -s auth_password
+        echo
+
+        if [[ ${#auth_password} -ge 8 ]]; then
+            break
+        else
+            ui_status "error" "Password phải có ít nhất 8 ký tự"
+        fi
+    done
+
+    # NocoDB Admin credentials
+    echo ""
+    echo -e "${UI_CYAN}=== NocoDB Admin ===${UI_NC}"
+
+    local domain=$(config_get "nocodb.domain")
+    local admin_email
+    echo -n -e "${UI_WHITE}Admin Email (admin@$domain): ${UI_NC}"
+    read -r admin_email
+    admin_email=${admin_email:-admin@$domain}
+
+    # Validate email format
+    while [[ ! "$admin_email" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; do
+        ui_status "error" "Email không hợp lệ"
+        echo -n -e "${UI_WHITE}Admin Email: ${UI_NC}"
+        read -r admin_email
+    done
+
+    local admin_password
+    echo -n -e "${UI_WHITE}Admin Password (tối thiểu 8 ký tự): ${UI_NC}"
+    read -s admin_password
+    echo
+
+    while [[ ${#admin_password} -lt 8 ]]; do
+        ui_status "error" "Password phải có ít nhất 8 ký tự"
+        echo -n -e "${UI_WHITE}Admin Password: ${UI_NC}"
+        read -s admin_password
+        echo
+    done
+
+    # Save credentials
+    config_set "nocodb.auth_username" "$auth_username"
+    config_set "nocodb.auth_password" "$auth_password"
+    config_set "nocodb.admin_email" "$admin_email"
+    config_set "nocodb.admin_password" "$admin_password"
+
+    ui_status "success" "Thông tin đăng nhập đã được lưu"
+}
+
+create_basic_auth() {
+    local username=$(config_get "nocodb.auth_username")
+    local password=$(config_get "nocodb.auth_password")
+
+    # Install htpasswd if needed
+    if ! command_exists htpasswd; then
+        ui_run_command "Cài đặt apache2-utils" "apt-get update && apt-get install -y apache2-utils"
+    fi
+
+    # Create htpasswd file
+    local htpasswd_file="/etc/nginx/.htpasswd-nocodb"
+    sudo rm -f "$htpasswd_file"
+
+    echo "$password" | sudo htpasswd -ci "$htpasswd_file" "$username"
+    sudo chown www-data:www-data "$htpasswd_file"
+    sudo chmod 644 "$htpasswd_file"
+
+    ui_status "success" "Basic auth tạo thành công"
 }
 
 # ===== DOCKER CONFIGURATION =====
 
-create_nocodb_docker_config() {
-    ui_start_spinner "Tạo Docker configuration"
+create_directories() {
+    ui_run_command "Tạo thư mục" "
+        mkdir -p $NOCODB_DIR $BACKUP_DIR
+        chmod 755 $NOCODB_DIR $BACKUP_DIR
+    "
+}
 
-    mkdir -p "$NOCODB_DIR"
+create_docker_config() {
+    ui_start_spinner "Tạo NocoDB config"
 
-    # Get N8N database credentials
-    local postgres_password=""
-    if [[ -f "/opt/n8n/.env" ]]; then
-        postgres_password=$(grep "POSTGRES_PASSWORD=" /opt/n8n/.env | cut -d'=' -f2)
-    fi
-
-    if [[ -z "$postgres_password" ]]; then
-        ui_stop_spinner
-        ui_status "error" "Không tìm thấy PostgreSQL password"
-        return 1
-    fi
-
-    # Generate admin credentials
-    local admin_password=$(generate_random_string 16)
+    local domain=$(config_get "nocodb.domain")
+    local port=$(config_get "nocodb.port")
+    local db_user=$(config_get "nocodb.db_user")
+    local n8n_db_password=$(config_get "nocodb.n8n_db_password")
+    local admin_email=$(config_get "nocodb.admin_email")
+    local admin_password=$(config_get "nocodb.admin_password")
+    local access_mode=$(config_get "nocodb.access_mode")
     local jwt_secret=$(generate_random_string 64)
 
-    # Create .env file
-    cat >"$NOCODB_DIR/.env" <<EOF
-# NocoDB Configuration
-POSTGRES_PASSWORD=$postgres_password
-NOCODB_ADMIN_PASSWORD=$admin_password
-NC_JWT_EXPIRES_IN=10h
-NC_JWT_SECRET=$jwt_secret
-EOF
+    # Add readonly flag if in readonly mode
+    local readonly_env=""
+    if [[ "$access_mode" == "readonly" ]]; then
+        readonly_env="- NC_DISABLE_AUDIT=true"
+    fi
 
-    # Get N8N domain
-    local n8n_domain=$(config_get "n8n.domain")
-    echo "N8N_DOMAIN=$n8n_domain" >>"$NOCODB_DIR/.env"
-
-    # Create docker-compose.yml
     cat >"$NOCODB_DIR/docker-compose.yml" <<EOF
-version: '3.8'
-
 services:
   nocodb:
     image: nocodb/nocodb:latest
     container_name: nocodb
     restart: unless-stopped
-    ports:
-      - "127.0.0.1:$NOCODB_PORT:8080"
+    network_mode: host
     environment:
-      - NC_DB=pg://host.docker.internal:5432?u=nocodb_user&p=\${POSTGRES_PASSWORD}&d=n8n
-      - NC_PUBLIC_URL=https://\${N8N_DOMAIN}/nocodb
-      - NC_ADMIN_EMAIL=admin@datalonline.vn
-      - NC_ADMIN_PASSWORD=\${NOCODB_ADMIN_PASSWORD}
-      - NC_JWT_EXPIRES_IN=\${NC_JWT_EXPIRES_IN}
-      - NC_JWT_SECRET=\${NC_JWT_SECRET}
-      - NC_CONNECT_TO_EXTERNAL_DB_DISABLED=false
+      - NC_DB=pg://localhost:5432?u=$db_user&p=$n8n_db_password&d=n8n
+      - NC_PUBLIC_URL=https://$domain/nocodb
+      - NC_ADMIN_EMAIL=$admin_email
+      - NC_ADMIN_PASSWORD=$admin_password
+      - NC_JWT_EXPIRES_IN=4h
+      - NC_JWT_SECRET=$jwt_secret
       - NC_DISABLE_TELE=true
-      - NC_MIN=true
-      - NC_TOOL_DIR=/usr/app/data/
+      - NC_SECURE_ATTACHMENTS=true
+      - NC_PORT=8080
+      $readonly_env
     volumes:
       - nocodb_data:/usr/app/data
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    networks:
-      - nocodb-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
 
 volumes:
   nocodb_data:
-    driver: local
-
-networks:
-  nocodb-network:
-    driver: bridge
 EOF
 
     ui_stop_spinner
-    ui_status "success" "Docker configuration tạo thành công"
-
-    # Save admin password to config
-    config_set "nocodb.admin_password" "$admin_password"
-
-    return 0
-}
-
-create_nocodb_standalone_config() {
-    mkdir -p "$NOCODB_DIR"
-
-    local admin_password=$(generate_random_string 16)
-
-    cat >"$NOCODB_DIR/docker-compose.yml" <<EOF
-version: '3.8'
-
-services:
-  nocodb:
-    image: nocodb/nocodb:latest
-    container_name: nocodb
-    restart: unless-stopped
-    ports:
-      - "$NOCODB_PORT:8080"
-    environment:
-      - NC_DB=sqlite:///usr/app/data/noco.db
-      - NC_ADMIN_EMAIL=admin@datalonline.vn
-      - NC_ADMIN_PASSWORD=$admin_password
-      - NC_DISABLE_TELE=true
-    volumes:
-      - nocodb_data:/usr/app/data
-
-volumes:
-  nocodb_data:
-EOF
-
-    config_set "nocodb.admin_password" "$admin_password"
+    ui_status "success" "Docker config tạo thành công"
 }
 
 # ===== NGINX CONFIGURATION =====
 
-setup_nginx_subdirectory() {
-    local domain="$1"
+configure_nginx() {
+    local domain=$(config_get "nocodb.domain")
+    local port=$(config_get "nocodb.port")
     local nginx_conf="/etc/nginx/sites-available/${domain}.conf"
 
-    ui_start_spinner "Cấu hình Nginx subdirectory"
+    ui_start_spinner "Cấu hình Nginx"
 
-    # Check if nginx config exists
     if [[ ! -f "$nginx_conf" ]]; then
         ui_stop_spinner
         ui_status "error" "Nginx config không tồn tại: $nginx_conf"
         return 1
     fi
 
-    # Backup existing config
-    cp "$nginx_conf" "${nginx_conf}.backup.$(date +%Y%m%d_%H%M%S)"
+    # Backup
+    sudo cp "$nginx_conf" "${nginx_conf}.backup.$(date +%Y%m%d_%H%M%S)"
 
-    # Check if NocoDB location already exists
-    if grep -q "location /nocodb" "$nginx_conf"; then
+    # Check if already configured
+    if sudo grep -q "location /nocodb" "$nginx_conf"; then
         ui_stop_spinner
-        ui_status "warning" "NocoDB location đã tồn tại trong Nginx config"
+        ui_status "warning" "NocoDB đã được cấu hình"
         return 0
     fi
 
-    # Create nocodb location block
-    local nocodb_config="
-    # NocoDB subdirectory
-    location /nocodb/ {
-        auth_basic \"Database Access\";
-        auth_basic_user_file /etc/nginx/.htpasswd-nocodb;
-        
-        proxy_pass http://127.0.0.1:$NOCODB_PORT/;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_set_header X-Forwarded-Prefix /nocodb;
-        
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection 'upgrade';
-        proxy_cache_bypass \$http_upgrade;
-        
-        client_max_body_size 100M;
-        proxy_read_timeout 300s;
-        proxy_connect_timeout 75s;
-    }"
-
-    # Find the last server block and insert before closing brace
-    local temp_file=$(mktemp)
-
-    # Use sed instead of awk to avoid string issues
-    sed '/^server {/,/^}$/ {
-        /^}$/ {
-            i\
+    # Add NocoDB configuration
+    sudo sed -i '/location ~ \/\\./i\
     # NocoDB subdirectory\
     location /nocodb/ {\
-        auth_basic "Database Access";\
+        auth_basic "N8N Database Access";\
         auth_basic_user_file /etc/nginx/.htpasswd-nocodb;\
         \
-        proxy_pass http://127.0.0.1:'"$NOCODB_PORT"'/;\
+        proxy_pass http://127.0.0.1:'$port'/;\
         proxy_set_header Host $host;\
         proxy_set_header X-Real-IP $remote_addr;\
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\
         proxy_set_header X-Forwarded-Proto $scheme;\
-        proxy_set_header X-Forwarded-Prefix /nocodb;\
+        proxy_set_header X-Script-Name /nocodb;\
         \
         proxy_http_version 1.1;\
         proxy_set_header Upgrade $http_upgrade;\
-        proxy_set_header Connection '"'"'upgrade'"'"';\
-        proxy_cache_bypass $http_upgrade;\
+        proxy_set_header Connection "upgrade";\
         \
-        client_max_body_size 100M;\
+        proxy_redirect ~^/(.*)$ /nocodb/$1;\
+        proxy_redirect / /nocodb/;\
+        \
+        client_max_body_size 50M;\
         proxy_read_timeout 300s;\
-        proxy_connect_timeout 75s;\
-    }
-        }
-    }' "$nginx_conf" >"$temp_file"
+    }\
+' "$nginx_conf"
 
-    mv "$temp_file" "$nginx_conf"
-
-    # Create basic auth
-    if ! create_basic_auth; then
+    # Test and reload nginx
+    if sudo nginx -t; then
+        sudo systemctl reload nginx
         ui_stop_spinner
-        ui_status "error" "Tạo basic auth thất bại"
-        return 1
-    fi
-
-    # Test nginx config
-    if ! nginx -t 2>/dev/null; then
-        ui_stop_spinner
-        ui_status "error" "Nginx config có lỗi, khôi phục backup"
-        cp "${nginx_conf}.backup."* "$nginx_conf"
-        return 1
-    fi
-
-    # Reload nginx
-    systemctl reload nginx
-
-    ui_stop_spinner
-    ui_status "success" "Nginx configuration updated"
-    return 0
-}
-
-create_basic_auth() {
-    local username="nocodb"
-    local password=$(generate_random_string 12)
-
-    # Install htpasswd if needed
-    if ! command_exists htpasswd; then
-        if ! ensure_package_installed apache2-utils; then
-            return 1
-        fi
-    fi
-
-    # Create htpasswd file
-    echo "$password" | htpasswd -ci /etc/nginx/.htpasswd-nocodb "$username" 2>/dev/null
-
-    # Save credentials
-    config_set "nocodb.auth_username" "$username"
-    config_set "nocodb.auth_password" "$password"
-
-    return 0
-}
-
-# ===== DATABASE SETUP =====
-
-create_database_user() {
-    ui_start_spinner "Tạo database user cho NocoDB"
-
-    local postgres_password=""
-    if [[ -f "/opt/n8n/.env" ]]; then
-        postgres_password=$(grep "POSTGRES_PASSWORD=" /opt/n8n/.env | cut -d'=' -f2)
-    fi
-
-    if [[ -z "$postgres_password" ]]; then
-        ui_stop_spinner
-        ui_status "error" "Không tìm thấy PostgreSQL password"
-        return 1
-    fi
-
-    # Check if user already exists
-    local user_exists=$(docker exec n8n-postgres psql -U n8n -d n8n -tAc "SELECT 1 FROM pg_roles WHERE rolname='nocodb_user';" 2>/dev/null || echo "")
-
-    if [[ "$user_exists" == "1" ]]; then
-        ui_stop_spinner
-        ui_status "success" "Database user nocodb_user đã tồn tại"
-        return 0
-    fi
-
-    # Create user and grant permissions
-    local create_user_sql="
-        CREATE USER nocodb_user WITH PASSWORD '$postgres_password';
-        GRANT CONNECT ON DATABASE n8n TO nocodb_user;
-        GRANT USAGE ON SCHEMA public TO nocodb_user;
-        GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO nocodb_user;
-        GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO nocodb_user;
-        ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO nocodb_user;
-        ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO nocodb_user;
-    "
-
-    if docker exec n8n-postgres psql -U n8n -d n8n -c "$create_user_sql" >/dev/null 2>&1; then
-        ui_stop_spinner
-        ui_status "success" "Database user tạo thành công"
+        ui_status "success" "Nginx cấu hình thành công"
         return 0
     else
         ui_stop_spinner
-        ui_status "error" "Tạo database user thất bại"
+        ui_status "error" "Nginx validation thất bại"
         return 1
     fi
 }
 
-# ===== SERVICE MANAGEMENT =====
-
-start_nocodb_service() {
-    ui_start_spinner "Khởi động NocoDB"
+start_services() {
+    ui_start_spinner "Khởi động services"
 
     cd "$NOCODB_DIR"
-    if ! docker compose up -d >/dev/null 2>&1; then
+    if ! docker compose up -d; then
         ui_stop_spinner
-        ui_status "error" "Không thể khởi động NocoDB"
         return 1
     fi
 
-    # Wait for service to be ready
-    local max_wait=30
+    # Wait for health check
+    local port=$(config_get "nocodb.port")
+    local max_wait=60
     local waited=0
 
     while [[ $waited -lt $max_wait ]]; do
-        if curl -s "http://localhost:$NOCODB_PORT" >/dev/null 2>&1; then
+        if curl -s "http://localhost:$port/api/v1/health" >/dev/null 2>&1; then
             ui_stop_spinner
-            ui_status "success" "NocoDB đã khởi động"
+            ui_status "success" "Services khởi động thành công"
             return 0
         fi
         sleep 2
@@ -465,24 +628,11 @@ start_nocodb_service() {
     done
 
     ui_stop_spinner
-    ui_status "error" "NocoDB không khởi động được (timeout)"
+    ui_status "error" "Services không khởi động (timeout)"
     return 1
 }
 
-restart_nocodb() {
-    ui_run_command "Restart NocoDB" "
-        cd $NOCODB_DIR
-        docker compose restart
-    "
-
-    # Wait for restart
-    sleep 5
-    if curl -s "http://localhost:$NOCODB_PORT" >/dev/null 2>&1; then
-        ui_status "success" "NocoDB restart thành công"
-    else
-        ui_status "error" "NocoDB restart thất bại"
-    fi
-}
+# ===== MANAGEMENT FUNCTIONS =====
 
 get_nocodb_status() {
     if docker ps --format '{{.Names}}' | grep -q "^nocodb$"; then
@@ -492,123 +642,37 @@ get_nocodb_status() {
     fi
 }
 
-# ===== USER MANAGEMENT =====
-
-manage_users() {
-    ui_section "Quản lý người dùng NocoDB"
-
-    echo "1) 📋 Hướng dẫn tạo user"
-    echo "2) 🔑 Đổi password admin"
-    echo "3) 📊 Tạo N8N dashboard templates"
-    echo "4) 🔧 Quản lý quyền truy cập"
-    echo "0) ⬅️  Quay lại"
-    echo ""
-
-    echo -n -e "${UI_WHITE}Chọn [0-4]: ${UI_NC}"
-    read -r choice
-
-    case "$choice" in
-    1) show_user_guide ;;
-    2) change_admin_password ;;
-    3) create_n8n_templates ;;
-    4) manage_permissions ;;
-    0) return ;;
-    esac
-}
-
-show_user_guide() {
-    local nocodb_url=$(config_get "nocodb.url")
-
-    ui_info_box "Tạo user trong NocoDB" \
-        "1. Truy cập: $nocodb_url" \
-        "2. Login với admin account" \
-        "3. Vào Settings → Team & Auth" \
-        "4. Click 'Invite Team'" \
-        "5. Nhập email và chọn role:" \
-        "   - Viewer: Chỉ xem" \
-        "   - Editor: Chỉnh sửa data" \
-        "   - Creator: Tạo views/forms" \
-        "   - Owner: Full quyền" \
-        "6. User sẽ nhận email invitation"
-}
-
-change_admin_password() {
-    echo -n "Nhập password mới cho admin: "
-    read -s new_password
-    echo
-
-    if [[ ${#new_password} -lt 8 ]]; then
-        ui_status "error" "Password phải ít nhất 8 ký tự"
-        return 1
-    fi
-
-    # Update .env
-    sed -i "s/NOCODB_ADMIN_PASSWORD=.*/NOCODB_ADMIN_PASSWORD=$new_password/" "$NOCODB_DIR/.env"
-
-    # Update config
-    config_set "nocodb.admin_password" "$new_password"
-
-    # Restart to apply
-    restart_nocodb
-    ui_status "success" "Password đã được cập nhật"
-}
-
-create_n8n_templates() {
-    ui_info_box "N8N Dashboard Templates" \
-        "Sẽ tạo các view hữu ích:" \
-        "- Active Workflows" \
-        "- Failed Executions" \
-        "- Execution Statistics" \
-        "- Recent Activity" \
-        "- Credential Management"
-
-    ui_status "info" "Templates sẽ có sẵn trong NocoDB UI sau khi truy cập"
-
-    local nocodb_url=$(config_get "nocodb.url")
-    echo "Truy cập $nocodb_url để sử dụng templates"
-}
-
-manage_permissions() {
-    ui_info_box "Quản lý quyền truy cập" \
-        "Basic Auth (Nginx level):" \
-        "- Username: $(config_get "nocodb.auth_username")" \
-        "- Password: $(config_get "nocodb.auth_password")" \
-        "" \
-        "NocoDB App level:" \
-        "- Admin: $(config_get "nocodb.admin_password")" \
-        "- Users: Quản lý trong NocoDB UI"
-}
-
-# ===== UTILITIES =====
-
 show_access_info() {
-    local nocodb_url=$(config_get "nocodb.url")
+    local domain=$(config_get "nocodb.domain")
     local auth_user=$(config_get "nocodb.auth_username")
     local auth_pass=$(config_get "nocodb.auth_password")
+    local admin_email=$(config_get "nocodb.admin_email")
     local admin_pass=$(config_get "nocodb.admin_password")
+    local access_mode=$(config_get "nocodb.access_mode")
 
     ui_info_box "Thông tin truy cập NocoDB" \
-        "URL: $nocodb_url" \
+        "URL: https://$domain/nocodb" \
+        "Chế độ: $([ "$access_mode" == "readonly" ] && echo "CHỈ XEM" || echo "ĐẦY ĐỦ")" \
         "" \
         "Basic Auth (Nginx):" \
         "Username: $auth_user" \
         "Password: $auth_pass" \
         "" \
         "NocoDB Admin:" \
-        "Email: admin@datalonline.vn" \
-        "Password: $admin_pass" \
-        "" \
-        "Database: N8N PostgreSQL" \
-        "Tables: workflows, executions, credentials, users"
+        "Email: $admin_email" \
+        "Password: $admin_pass"
 }
 
-show_logs() {
-    echo "📝 NocoDB Logs:"
-    echo "==============="
+manage_access_permissions() {
+    ui_section "Quản lý quyền truy cập"
+
+    local current_mode=$(config_get "nocodb.access_mode")
+    echo "Chế độ hiện tại: $([ "$current_mode" == "readonly" ] && echo "CHỈ XEM" || echo "ĐẦY ĐỦ")"
     echo ""
-    echo "1) 📄 Real-time logs"
-    echo "2) 📄 Recent logs (50 dòng)"
-    echo "3) 📄 Error logs only"
+
+    echo "1) 🔄 Chuyển đổi chế độ truy cập"
+    echo "2) 🔑 Đổi password Basic Auth"
+    echo "3) 🔐 Đổi password Admin NocoDB"
     echo "0) ⬅️  Quay lại"
     echo ""
 
@@ -616,162 +680,296 @@ show_logs() {
     read -r choice
 
     case "$choice" in
-    1) docker logs -f nocodb ;;
-    2) docker logs --tail 50 nocodb ;;
-    3) docker logs nocodb 2>&1 | grep -i "error\|exception\|fail" || echo "Không có error logs" ;;
+    1) toggle_access_mode ;;
+    2) change_basic_auth ;;
+    3) change_admin_password ;;
     0) return ;;
     esac
 }
 
-configure_nocodb() {
-    ui_section "Cấu hình NocoDB"
+toggle_access_mode() {
+    local current_mode=$(config_get "nocodb.access_mode")
+    local new_mode
 
-    echo "1) 🔧 Chỉnh sửa environment variables"
-    echo "2) 🔄 Cập nhật domain"
-    echo "3) 📊 Export configuration"
-    echo "4) 🔒 Cập nhật Basic Auth"
-    echo "0) ⬅️  Quay lại"
-    echo ""
+    if [[ "$current_mode" == "readonly" ]]; then
+        new_mode="full"
+        ui_warning_box "⚠️ CẢNH BÁO" \
+            "Chuyển sang chế độ ĐẦY ĐỦ" \
+            "Cho phép CHỈNH SỬA data N8N!"
 
-    echo -n -e "${UI_WHITE}Chọn [0-4]: ${UI_NC}"
-    read -r choice
-
-    case "$choice" in
-    1) edit_env_file ;;
-    2) update_domain ;;
-    3) export_config ;;
-    4) update_basic_auth ;;
-    0) return ;;
-    esac
-}
-
-edit_env_file() {
-    if command_exists nano; then
-        nano "$NOCODB_DIR/.env"
-    elif command_exists vim; then
-        vim "$NOCODB_DIR/.env"
+        if ! ui_confirm "Tiếp tục chuyển sang chế độ đầy đủ?"; then
+            return
+        fi
     else
-        cat "$NOCODB_DIR/.env"
-        ui_status "info" "File: $NOCODB_DIR/.env"
+        new_mode="readonly"
+        ui_info_box "ℹ️ Thông báo" \
+            "Chuyển sang chế độ CHỈ XEM" \
+            "An toàn hơn cho data N8N"
     fi
 
-    echo -n "Restart NocoDB để áp dụng thay đổi? [Y/n]: "
-    read -r restart
-    if [[ ! "$restart" =~ ^[Nn]$ ]]; then
-        restart_nocodb
+    config_set "nocodb.access_mode" "$new_mode"
+
+    # Reconfigure database access
+    if setup_database_access; then
+        # Restart NocoDB
+        cd "$NOCODB_DIR"
+        docker compose down
+        create_docker_config
+        docker compose up -d
+
+        ui_status "success" "Đã chuyển sang chế độ $([ "$new_mode" == "readonly" ] && echo "CHỈ XEM" || echo "ĐẦY ĐỦ")"
+    else
+        ui_status "error" "Không thể chuyển đổi chế độ"
     fi
 }
 
-update_domain() {
-    echo -n "Nhập domain mới: "
-    read -r new_domain
-
-    if [[ -z "$new_domain" ]]; then
-        ui_status "error" "Domain không được để trống"
-        return 1
-    fi
-
-    # Update .env
-    sed -i "s/N8N_DOMAIN=.*/N8N_DOMAIN=$new_domain/" "$NOCODB_DIR/.env"
-
-    # Update config
-    config_set "nocodb.domain" "$new_domain"
-    config_set "nocodb.url" "https://$new_domain/nocodb"
-
-    restart_nocodb
-    ui_status "success" "Domain đã được cập nhật"
-}
-
-export_config() {
-    local export_file="/tmp/nocodb-config-$(date +%Y%m%d_%H%M%S).txt"
-
-    cat >"$export_file" <<EOF
-# NocoDB Configuration Export
-# Generated: $(date)
-
-URL: $(config_get "nocodb.url")
-Domain: $(config_get "nocodb.domain")
-Basic Auth User: $(config_get "nocodb.auth_username")
-Basic Auth Pass: $(config_get "nocodb.auth_password")
-Admin Password: $(config_get "nocodb.admin_password")
-
-# Environment Variables:
-$(cat "$NOCODB_DIR/.env")
-EOF
-
-    ui_status "success" "Configuration exported: $export_file"
-}
-
-update_basic_auth() {
-    echo -n "Nhập username mới: "
+change_basic_auth() {
+    echo -n "Username mới: "
     read -r new_username
-    echo -n "Nhập password mới: "
+    echo -n "Password mới: "
     read -s new_password
     echo
 
-    if [[ -z "$new_username" || -z "$new_password" ]]; then
-        ui_status "error" "Username và password không được để trống"
-        return 1
-    fi
-
-    # Update htpasswd
-    echo "$new_password" | htpasswd -ci /etc/nginx/.htpasswd-nocodb "$new_username"
-
-    # Update config
-    config_set "nocodb.auth_username" "$new_username"
-    config_set "nocodb.auth_password" "$new_password"
-
-    # Reload nginx
-    systemctl reload nginx
-
-    ui_status "success" "Basic Auth đã được cập nhật"
-}
-
-uninstall_nocodb() {
-    ui_warning_box "Cảnh báo" \
-        "Sẽ xóa toàn bộ NocoDB và data" \
-        "Không thể khôi phục" \
-        "Nginx config sẽ được restore"
-
-    if ! ui_confirm "Tiếp tục gỡ cài đặt?"; then
+    if [[ ${#new_username} -lt 3 || ${#new_password} -lt 8 ]]; then
+        ui_status "error" "Username >= 3, Password >= 8 ký tự"
         return
     fi
 
-    # Stop and remove containers
-    if [[ -d "$NOCODB_DIR" ]]; then
-        ui_run_command "Dừng và xóa NocoDB" "
-            cd $NOCODB_DIR
-            docker compose down -v
-        "
+    # Update htpasswd
+    echo "$new_password" | sudo htpasswd -ci /etc/nginx/.htpasswd-nocodb "$new_username"
+
+    config_set "nocodb.auth_username" "$new_username"
+    config_set "nocodb.auth_password" "$new_password"
+
+    sudo systemctl reload nginx
+    ui_status "success" "Basic Auth đã cập nhật"
+}
+
+change_admin_password() {
+    echo -n "Password mới cho admin: "
+    read -s new_password
+    echo
+
+    if [[ ${#new_password} -lt 8 ]]; then
+        ui_status "error" "Password phải ít nhất 8 ký tự"
+        return
     fi
 
-    # Remove directory
-    ui_run_command "Xóa thư mục cài đặt" "rm -rf $NOCODB_DIR"
+    config_set "nocodb.admin_password" "$new_password"
 
-    # Restore nginx config
-    local domain=$(config_get "nocodb.domain")
+    # Update container env
+    cd "$NOCODB_DIR"
+    docker compose down
+    create_docker_config
+    docker compose up -d
+
+    ui_status "success" "Password đã cập nhật"
+}
+
+# ===== N8N TABLES GUIDE =====
+
+show_n8n_tables_guide() {
+    ui_header "Hướng dẫn N8N Database Tables"
+
+    ui_info_box "📋 Bảng quan trọng" \
+        "workflow_entity: Lưu trữ workflows" \
+        "credentials_entity: Thông tin xác thực" \
+        "execution_entity: Lịch sử chạy workflows" \
+        "webhook_entity: Webhooks đã đăng ký"
+
+    echo ""
+    echo -e "${UI_CYAN}=== Cảnh báo khi chỉnh sửa ===${UI_NC}"
+    echo "❌ KHÔNG xóa hoặc sửa trực tiếp các bảng sau:"
+    echo "   - credentials_entity (mã hóa, sửa sẽ hỏng)"
+    echo "   - settings (cấu hình hệ thống)"
+    echo ""
+    echo "⚠️  CẨN THẬN khi sửa:"
+    echo "   - workflow_entity (backup trước khi sửa)"
+    echo "   - execution_entity (có thể xóa log cũ)"
+    echo ""
+    echo "✅ AN TOÀN để xem:"
+    echo "   - Tất cả các bảng ở chế độ SELECT"
+    echo "   - Export data để phân tích"
+    echo ""
+
+    read -p "Nhấn Enter để tiếp tục..."
+}
+
+# ===== BACKUP FUNCTIONS =====
+
+backup_n8n_data() {
+    ui_section "Backup N8N Data"
+
+    local backup_name="n8n_backup_$(date +%Y%m%d_%H%M%S)"
+    local backup_path="$BACKUP_DIR/$backup_name.sql"
+
+    ui_start_spinner "Đang backup database..."
+
+    # Create backup
+    if docker exec n8n-postgres pg_dump -U n8n n8n > "$backup_path"; then
+        ui_stop_spinner
+        ui_status "success" "Backup thành công: $backup_path"
+
+        # Compress
+        if gzip "$backup_path"; then
+            ui_status "success" "Đã nén: ${backup_path}.gz"
+        fi
+    else
+        ui_stop_spinner
+        ui_status "error" "Backup thất bại"
+        return 1
+    fi
+
+    # Show recent backups
+    echo ""
+    echo "📁 Backups gần đây:"
+    ls -lh "$BACKUP_DIR"/*.gz 2>/dev/null | tail -5 || echo "Không có backup"
+}
+
+restart_nocodb() {
+    ui_warning_box "Restart NocoDB" "Service sẽ tạm thời không khả dụng"
+
+    if ! ui_confirm "Tiếp tục restart?"; then
+        return
+    fi
+
+    ui_run_command "Restart NocoDB" "
+        cd $NOCODB_DIR && docker compose restart
+    "
+
+    sleep 5
+    local port=$(config_get "nocodb.port")
+    if curl -s "http://localhost:$port/api/v1/health" >/dev/null 2>&1; then
+        ui_status "success" "Restart thành công"
+    else
+        ui_status "error" "Restart thất bại"
+    fi
+}
+
+show_logs() {
+    echo "📝 NocoDB Logs:"
+    echo "1) Application logs"
+    echo "2) Error logs only"
+    echo "3) Live logs (Ctrl+C để thoát)"
+    echo "0) Quay lại"
+    echo ""
+
+    echo -n -e "${UI_WHITE}Chọn [0-3]: ${UI_NC}"
+    read -r choice
+
+    case "$choice" in
+    1) docker logs --tail 50 nocodb ;;
+    2) docker logs nocodb 2>&1 | grep -i "error\|exception" || echo "No errors" ;;
+    3) docker logs -f nocodb ;;
+    0) return ;;
+    esac
+}
+
+# ===== CLEANUP FUNCTIONS =====
+
+cleanup_failed_installation() {
+    ui_status "warning" "Dọn dẹp cài đặt thất bại..."
+
+    # Stop containers
+    if [[ -f "$NOCODB_DIR/docker-compose.yml" ]]; then
+        cd "$NOCODB_DIR" && docker compose down -v 2>/dev/null || true
+    fi
+
+    # Remove directories
+    rm -rf "$NOCODB_DIR" 2>/dev/null || true
+
+    # Restore nginx if needed
+    local domain=$(config_get "nocodb.domain" "")
     if [[ -n "$domain" ]]; then
         local nginx_conf="/etc/nginx/sites-available/${domain}.conf"
-        local backup_file=$(ls "${nginx_conf}.backup."* 2>/dev/null | head -1)
-
-        if [[ -f "$backup_file" ]]; then
-            ui_run_command "Khôi phục Nginx config" "
-                cp '$backup_file' '$nginx_conf'
-                nginx -t && systemctl reload nginx
-            "
+        local backup=$(ls "${nginx_conf}.backup."* 2>/dev/null | tail -1)
+        if [[ -f "$backup" ]]; then
+            cp "$backup" "$nginx_conf"
+            systemctl reload nginx 2>/dev/null || true
         fi
     fi
 
-    # Remove htpasswd file
-    rm -f /etc/nginx/.htpasswd-nocodb
-
-    # Clear config
-    config_set "nocodb.installed" "false"
-    config_set "nocodb.domain" ""
-    config_set "nocodb.url" ""
-
-    ui_status "success" "NocoDB đã được gỡ cài đặt hoàn toàn"
+    rm -f /etc/nginx/.htpasswd-nocodb 2>/dev/null || true
 }
 
-# Export functions
+uninstall_nocodb() {
+    ui_warning_box "Gỡ cài đặt NocoDB" \
+        "⚠️  Sẽ xóa toàn bộ cấu hình NocoDB" \
+        "Data N8N sẽ KHÔNG bị ảnh hưởng"
+
+    echo -n "Gõ 'DELETE' để xác nhận: "
+    read -r confirmation
+
+    if [[ "$confirmation" != "DELETE" ]]; then
+        ui_status "info" "Đã hủy"
+        return
+    fi
+
+    # Stop services
+    if [[ -f "$NOCODB_DIR/docker-compose.yml" ]]; then
+        ui_run_command "Dừng services" "
+            cd $NOCODB_DIR && docker compose down -v
+        "
+    fi
+
+    # Deep cleanup
+    ui_run_command "Xóa containers và volumes" "
+        # Remove any NocoDB related containers
+        docker ps -a --format '{{.Names}}' | grep -E 'nocodb' | xargs -r docker rm -f 2>/dev/null || true
+        
+        # Remove all NocoDB volumes
+        docker volume ls --format '{{.Name}}' | grep -E 'nocodb' | xargs -r docker volume rm 2>/dev/null || true
+    "
+
+    # Remove directories
+    ui_run_command "Xóa thư mục" "
+        rm -rf $NOCODB_DIR /opt/nocodb-db /nocodb-cloud 2>/dev/null || true
+    "
+
+    # Drop database users
+    if docker ps --format '{{.Names}}' | grep -q "n8n-postgres"; then
+        ui_run_command "Xóa database users" "
+            docker exec n8n-postgres psql -U n8n -d n8n -c '
+                DROP USER IF EXISTS nocodb_readonly CASCADE;
+                DROP USER IF EXISTS nocodb_full CASCADE;
+            ' 2>/dev/null || true
+        "
+    fi
+
+    # Clean all nginx configs
+    ui_run_command "Dọn dẹp Nginx configs" "
+        # Find and clean all nginx configs with nocodb
+        for conf in /etc/nginx/sites-available/*.conf; do
+            if grep -q 'location /nocodb' \"\$conf\" 2>/dev/null; then
+                # Backup
+                cp \"\$conf\" \"\${conf}.pre-uninstall.\$(date +%Y%m%d_%H%M%S)\"
+                # Remove nocodb block
+                sed -i '/# NocoDB subdirectory/,/^$/d' \"\$conf\"
+            fi
+        done
+        
+        # Remove all htpasswd files
+        rm -f /etc/nginx/.htpasswd-nocodb*
+        
+        # Reload nginx
+        systemctl reload nginx || true
+    "
+
+    # Clean backup directory
+    if [[ -d "$BACKUP_DIR" ]]; then
+        ui_run_command "Xóa backups" "rm -rf $BACKUP_DIR"
+    fi
+
+    # Clear all config
+    ui_run_command "Xóa cấu hình" "
+        # Clear all nocodb related configs
+        for key in \$(grep '^nocodb\\.' ~/.config/datalonline-n8n/settings.conf 2>/dev/null | cut -d= -f1); do
+            sed -i \"/^\$key=/d\" ~/.config/datalonline-n8n/settings.conf
+        done
+    "
+
+    ui_status "success" "NocoDB đã được gỡ hoàn toàn"
+}
+
+# Export main function
 export -f nocodb_main_menu
