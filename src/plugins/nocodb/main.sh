@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# DataOnline N8N Manager - NocoDB N8N Data Manager
-# Phiên bản: 2.0.0
+# DataOnline N8N Manager - NocoDB N8N Data Manager (FIXED)
+# Phiên bản: 2.1.0 - Fixed subpath routing
 
 set -euo pipefail
 
@@ -204,7 +204,7 @@ check_prerequisites() {
     fi
 
     ui_stop_spinner
-    
+
     # Deep cleanup old installations
     cleanup_old_nocodb_installations
 
@@ -215,7 +215,7 @@ cleanup_old_nocodb_installations() {
     ui_start_spinner "Dọn dẹp cài đặt cũ..."
 
     # Stop and remove all NocoDB related containers
-    local containers=$(docker ps -a --format '{{.Names}}' | grep -E "nocodb|nocodb-postgres" || true)
+    local containers=$(docker ps -a --format '{{.Names}}' | grep -E "nocodb" || true)
     if [[ -n "$containers" ]]; then
         ui_status "info" "Dừng containers cũ..."
         echo "$containers" | xargs -r docker rm -f 2>/dev/null || true
@@ -246,7 +246,7 @@ cleanup_old_nocodb_installations() {
         " 2>/dev/null || true
     fi
 
-    # Clean all nginx configs
+    # FIXED: Thorough nginx config cleanup
     cleanup_nginx_configs
 
     # Remove htpasswd files
@@ -258,23 +258,29 @@ cleanup_old_nocodb_installations() {
 
 cleanup_nginx_configs() {
     local cleaned=0
-    
+
+    # Remove debug configs first
+    rm -f /etc/nginx/sites-enabled/*_debug.conf 2>/dev/null || true
+    rm -f /etc/nginx/sites-available/*_debug.conf 2>/dev/null || true
+
     for nginx_conf in /etc/nginx/sites-available/*.conf; do
-        if [[ -f "$nginx_conf" ]] && grep -q "location /nocodb" "$nginx_conf" 2>/dev/null; then
+        if [[ -f "$nginx_conf" ]] && grep -q "location.*nocodb" "$nginx_conf" 2>/dev/null; then
             ui_status "info" "Dọn dẹp NocoDB config trong: $(basename "$nginx_conf")"
-            
+
             # Backup first
             cp "$nginx_conf" "${nginx_conf}.pre-nocodb-cleanup.$(date +%Y%m%d_%H%M%S)"
-            
-            # Remove nocodb location block
-            sed -i '/# NocoDB subdirectory/,/^$/d' "$nginx_conf" 2>/dev/null || true
-            
+
+            # Remove ALL nocodb-related config blocks
+            sed -i '/# NocoDB/,/^$/d' "$nginx_conf" 2>/dev/null || true
+            sed -i '/location.*nocodb/,/}/d' "$nginx_conf" 2>/dev/null || true
+
             ((cleaned++))
         fi
     done
-    
+
+    # Force nginx restart if cleaned configs
     if [[ $cleaned -gt 0 ]]; then
-        systemctl reload nginx 2>/dev/null || true
+        nginx -t && systemctl restart nginx 2>/dev/null || true
     fi
 }
 
@@ -302,10 +308,10 @@ setup_database_access() {
         ui_stop_spinner
         ui_status "error" "PostgreSQL container không chạy"
         ui_status "info" "Đang khởi động PostgreSQL..."
-        
+
         cd /opt/n8n && docker compose up -d postgres
         sleep 5
-        
+
         if ! docker ps --format '{{.Names}}' | grep -q "n8n-postgres"; then
             ui_status "error" "Không thể khởi động PostgreSQL"
             return 1
@@ -373,11 +379,11 @@ setup_database_access() {
 
     # Create temp SQL file to avoid escaping issues
     local temp_sql="/tmp/nocodb_setup_$.sql"
-    echo "$sql_commands" > "$temp_sql"
+    echo "$sql_commands" >"$temp_sql"
 
     # Execute SQL commands with error output
     local error_log="/tmp/nocodb_db_error_$.log"
-    if docker exec -i n8n-postgres psql -U n8n -d n8n < "$temp_sql" > "$error_log" 2>&1; then
+    if docker exec -i n8n-postgres psql -U n8n -d n8n <"$temp_sql" >"$error_log" 2>&1; then
         ui_status "success" "Database user $db_user đã được tạo"
         rm -f "$temp_sql" "$error_log"
     else
@@ -486,6 +492,7 @@ create_directories() {
     "
 }
 
+# FIXED: Docker configuration with proper network and health check
 create_docker_config() {
     ui_start_spinner "Tạo NocoDB config"
 
@@ -501,31 +508,35 @@ create_docker_config() {
     # Add readonly flag if in readonly mode
     local readonly_env=""
     if [[ "$access_mode" == "readonly" ]]; then
-        readonly_env="- NC_DISABLE_AUDIT=true"
+        readonly_env="      - NC_DISABLE_AUDIT=true"
     fi
 
-    cat >"$NOCODB_DIR/docker-compose.yml" <<EOF
-services:
+    # Use printf to avoid heredoc issues
+    printf 'services:
   nocodb:
     image: nocodb/nocodb:latest
     container_name: nocodb
     restart: unless-stopped
-    network_mode: host
+    ports:
+      - "%s:8080"
     environment:
-      - NC_DB=pg://localhost:5432?u=$db_user&p=$n8n_db_password&d=n8n
-      - NC_PUBLIC_URL=https://$domain/nocodb
-      - NC_ADMIN_EMAIL=$admin_email
-      - NC_ADMIN_PASSWORD=$admin_password
+      - NC_DB=pg://n8n-postgres:5432?u=%s&p=%s&d=n8n
+      - NC_PUBLIC_URL=https://%s/nocodb
+      - NC_ADMIN_EMAIL=%s
+      - NC_ADMIN_PASSWORD=%s
       - NC_JWT_EXPIRES_IN=4h
-      - NC_JWT_SECRET=$jwt_secret
+      - NC_JWT_SECRET=%s
       - NC_DISABLE_TELE=true
-      - NC_SECURE_ATTACHMENTS=true
-      - NC_PORT=8080
-      $readonly_env
+      - PORT=8080
+%s
     volumes:
       - nocodb_data:/usr/app/data
+    networks:
+      - n8n_n8n-network
+    depends_on:
+      - n8n-postgres
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/api/v1/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8080/dashboard"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -533,7 +544,11 @@ services:
 
 volumes:
   nocodb_data:
-EOF
+
+networks:
+  n8n_n8n-network:
+    external: true
+' "$port" "$db_user" "$n8n_db_password" "$domain" "$admin_email" "$admin_password" "$jwt_secret" "$readonly_env" >"$NOCODB_DIR/docker-compose.yml"
 
     ui_stop_spinner
     ui_status "success" "Docker config tạo thành công"
@@ -541,6 +556,7 @@ EOF
 
 # ===== NGINX CONFIGURATION =====
 
+# FIXED: Nginx configuration with proper proxy settings
 configure_nginx() {
     local domain=$(config_get "nocodb.domain")
     local port=$(config_get "nocodb.port")
@@ -554,51 +570,49 @@ configure_nginx() {
         return 1
     fi
 
-    # Backup
+    # Backup original
     sudo cp "$nginx_conf" "${nginx_conf}.backup.$(date +%Y%m%d_%H%M%S)"
 
-    # Check if already configured
-    if sudo grep -q "location /nocodb" "$nginx_conf"; then
-        ui_stop_spinner
-        ui_status "warning" "NocoDB đã được cấu hình"
-        return 0
-    fi
+    # Remove any existing nocodb configs completely
+    sudo sed -i '/# NocoDB/,/^$/d' "$nginx_conf" 2>/dev/null || true
+    sudo sed -i '/location \/nocodb/,/}/d' "$nginx_conf" 2>/dev/null || true
 
-    # Add NocoDB configuration
-    sudo sed -i '/location ~ \/\\./i\
-    # NocoDB subdirectory\
-    location /nocodb/ {\
-        auth_basic "N8N Database Access";\
-        auth_basic_user_file /etc/nginx/.htpasswd-nocodb;\
-        \
-        proxy_pass http://127.0.0.1:'$port'/;\
-        proxy_set_header Host $host;\
-        proxy_set_header X-Real-IP $remote_addr;\
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\
-        proxy_set_header X-Forwarded-Proto $scheme;\
-        proxy_set_header X-Script-Name /nocodb;\
-        \
-        proxy_http_version 1.1;\
-        proxy_set_header Upgrade $http_upgrade;\
-        proxy_set_header Connection "upgrade";\
-        \
-        proxy_redirect ~^/(.*)$ /nocodb/$1;\
-        proxy_redirect / /nocodb/;\
-        \
-        client_max_body_size 50M;\
-        proxy_read_timeout 300s;\
-    }\
-' "$nginx_conf"
+    # Remove conflicting debug configs
+    sudo rm -f /etc/nginx/sites-enabled/${domain}_debug.conf 2>/dev/null || true
 
-    # Test and reload nginx
+    # Create clean config using printf (more reliable than sed)
+    local temp_conf="/tmp/nginx_nocodb_$.conf"
+
+    # Read existing config and add nocodb location
+    awk '
+    /location \/ \{/ { 
+        print "    location /nocodb {"
+        print "        proxy_pass http://127.0.0.1:'$port'/dashboard;"
+        print "        proxy_set_header Host $host;"
+        print "        proxy_redirect /dashboard /nocodb;"
+        print "    }"
+        print ""
+    }
+    { print }
+    ' "$nginx_conf" >"$temp_conf"
+
+    # Replace original config
+    sudo cp "$temp_conf" "$nginx_conf"
+    rm -f "$temp_conf"
+
+    ui_stop_spinner
+
+    # Test nginx config
     if sudo nginx -t; then
-        sudo systemctl reload nginx
-        ui_stop_spinner
+        # Force restart nginx to clear any cached configs
+        sudo systemctl restart nginx
         ui_status "success" "Nginx cấu hình thành công"
         return 0
     else
-        ui_stop_spinner
         ui_status "error" "Nginx validation thất bại"
+        # Restore backup
+        sudo cp "${nginx_conf}.backup.$(date +%Y%m%d_%H%M%S)" "$nginx_conf"
+        sudo nginx -t && sudo systemctl restart nginx
         return 1
     fi
 }
@@ -612,13 +626,15 @@ start_services() {
         return 1
     fi
 
-    # Wait for health check
+    # Wait for health check with updated path
     local port=$(config_get "nocodb.port")
     local max_wait=60
     local waited=0
 
     while [[ $waited -lt $max_wait ]]; do
-        if curl -s "http://localhost:$port/api/v1/health" >/dev/null 2>&1; then
+        # Test both health endpoints
+        if curl -s "http://localhost:$port/api/v1/health" >/dev/null 2>&1 ||
+            curl -s "http://localhost:$port/nocodb/api/v1/health" >/dev/null 2>&1; then
             ui_stop_spinner
             ui_status "success" "Services khởi động thành công"
             return 0
@@ -806,7 +822,7 @@ backup_n8n_data() {
     ui_start_spinner "Đang backup database..."
 
     # Create backup
-    if docker exec n8n-postgres pg_dump -U n8n n8n > "$backup_path"; then
+    if docker exec n8n-postgres pg_dump -U n8n n8n >"$backup_path"; then
         ui_stop_spinner
         ui_status "success" "Backup thành công: $backup_path"
 
