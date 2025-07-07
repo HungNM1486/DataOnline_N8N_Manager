@@ -48,6 +48,7 @@ show_main_menu() {
     echo -e "3️⃣  ⚙️  Quản lý dịch vụ"
     echo -e "4️⃣  💾 Sao lưu & khôi phục"
     echo -e "5️⃣  🔄 Cập nhật phiên bản"
+    echo -e "6️⃣  🗄️  Quản lý Database"
     echo ""
     echo -e "${LOG_WHITE}HỖ TRỢ:${LOG_NC}"
     echo -e "A️⃣  📋 Thông tin hệ thống"
@@ -70,6 +71,7 @@ handle_selection() {
     3) handle_service_management ;;
     4) handle_backup_restore ;;
     5) handle_updates ;;
+    6) handle_database_management ;;
     A | a) show_system_info ;;
     B | b) show_configuration_menu ;;
     C | c) show_help ;;
@@ -119,7 +121,7 @@ handle_domain_management() {
     echo "0) Quay lại"
     echo ""
 
-    read -p "Chọn [0-4]: " domain_choice
+    read -p "Chọn [0-3]: " domain_choice
 
     case "$domain_choice" in
     1)
@@ -297,6 +299,42 @@ handle_updates() {
     fi
 }
 
+# Xử lý quản lý database
+handle_database_management() {
+    # Source database manager plugin
+    local database_plugin="$PROJECT_ROOT/src/plugins/database-manager/main.sh"
+    
+    if [[ -f "$database_plugin" ]]; then
+        source "$database_plugin"
+        # Gọi hàm main của database manager
+        database_manager_main
+    else
+        echo ""
+        log_error "Không tìm thấy Database Manager plugin"
+        log_info "Đường dẫn: $database_plugin"
+        echo ""
+        echo "🔧 Troubleshooting:"
+        echo "1. Kiểm tra plugin đã được cài đặt đúng chưa:"
+        echo "   ls -la $PROJECT_ROOT/src/plugins/database-manager/"
+        echo ""
+        echo "2. Plugin files cần có:"
+        echo "   ✅ main.sh - Entry point"
+        echo "   ✅ nocodb-setup.sh - Docker integration"
+        echo "   ✅ nocodb-config.sh - Views configuration"
+        echo "   ✅ nocodb-management.sh - Operations"
+        echo ""
+        echo "3. Tạo plugin files nếu chưa có:"
+        echo "   mkdir -p $PROJECT_ROOT/src/plugins/database-manager/"
+        echo "   # Copy plugin files vào directory này"
+        echo ""
+        echo "4. Set permissions:"
+        echo "   chmod +x $PROJECT_ROOT/src/plugins/database-manager/*.sh"
+        echo ""
+        read -p "Nhấn Enter để tiếp tục..."
+        return 1
+    fi
+}
+
 # Thông tin hệ thống nâng cao
 show_system_info() {
     echo ""
@@ -338,6 +376,38 @@ show_system_info() {
     echo "  Phiên bản: $APP_VERSION"
     echo "  File cấu hình: $CONFIG_FILE"
     echo "  File log: $(config_get "logging.file")"
+    
+    echo ""
+    echo "N8N Status:"
+    if is_n8n_installed; then
+        echo "  N8N: ✅ Đã cài đặt"
+        if command_exists docker; then
+            local n8n_version=$(docker exec n8n n8n --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo "unknown")
+            echo "  Version: $n8n_version"
+            echo "  Status: $(docker ps --format '{{.Status}}' --filter 'name=n8n' | head -1 || echo "Stopped")"
+        fi
+    else
+        echo "  N8N: ❌ Chưa cài đặt"
+    fi
+    
+    echo ""
+    echo "Database Manager:"
+    if [[ -f "$PROJECT_ROOT/src/plugins/database-manager/main.sh" ]]; then
+        echo "  Plugin: ✅ Đã cài đặt"
+        echo "  Files: $(ls -1 "$PROJECT_ROOT/src/plugins/database-manager/" 2>/dev/null | wc -l) files"
+        
+        # Check NocoDB status if possible
+        if command_exists docker && docker ps --format '{{.Names}}' | grep -q "nocodb"; then
+            echo "  NocoDB: ✅ Đang chạy"
+        elif command_exists curl && curl -s "http://localhost:8080/api/v1/health" >/dev/null 2>&1; then
+            echo "  NocoDB: ✅ API available"
+        else
+            echo "  NocoDB: ❌ Chưa chạy"
+        fi
+    else
+        echo "  Plugin: ❌ Chưa cài đặt"
+    fi
+    
     echo "════════════════════════════════════════"
     echo ""
 }
@@ -428,6 +498,13 @@ show_help() {
     echo "  • Phiên bản: $APP_VERSION"
     echo "  • Build: Development"
     echo "  • Hỗ trợ: Ubuntu 24.04+"
+    echo ""
+    echo "Database Manager:"
+    echo "  • NocoDB integration cho web interface"
+    echo "  • Thay thế CLI commands phức tạp"
+    echo "  • Mobile-friendly dashboard"
+    echo "  • User management & permissions"
+    echo "  • Export/import capabilities"
     echo "════════════════════════════════════════"
     echo ""
 }
@@ -441,7 +518,7 @@ main() {
 
     while true; do
         show_main_menu
-        read -p "Nhập lựa chọn [1-5, A-D, 0]: " choice
+        read -p "Nhập lựa chọn [1-6, A-D, 0]: " choice
         echo ""
         handle_selection "$choice"
         echo ""
