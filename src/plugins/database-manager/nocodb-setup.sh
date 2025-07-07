@@ -9,48 +9,69 @@ set -euo pipefail
 
 setup_nocodb_integration() {
     ui_section "Cài đặt NocoDB Integration"
+
+    NOCODB_PUBLIC_URL=https://db.${N8N_DOMAIN:-localhost}
     
-    # Step 1: Generate secrets
+    # Existing setup steps...
     if ! generate_nocodb_secrets; then
-        ui_status "error" "Tạo secrets thất bại"
         return 1
     fi
     
-    # Step 2: Backup current docker-compose
     if ! backup_docker_compose; then
-        ui_status "error" "Backup docker-compose thất bại"  
         return 1
     fi
     
-    # Step 3: Update docker-compose.yml
     if ! update_docker_compose_for_nocodb; then
-        ui_status "error" "Cập nhật docker-compose thất bại"
         return 1
     fi
     
-    # Step 4: Start NocoDB service
     if ! start_nocodb_service; then
-        ui_status "error" "Khởi động NocoDB thất bại"
-        rollback_docker_compose
         return 1
     fi
     
-    # Step 5: Wait for NocoDB ready
     if ! wait_for_nocodb_ready; then
-        ui_status "error" "NocoDB không thể khởi động"
-        rollback_docker_compose
         return 1
     fi
     
-    # Step 6: Configure database connection
     if ! configure_nocodb_database; then
-        ui_status "error" "Cấu hình database thất bại"
         return 1
+    fi
+    
+    # NEW: SSL setup option
+    echo ""
+    echo -n -e "${UI_YELLOW}Cấu hình SSL cho subdomain? [Y/n]: ${UI_NC}"
+    read -r setup_ssl
+    if [[ ! "$setup_ssl" =~ ^[Nn]$ ]]; then
+        setup_nocodb_ssl
     fi
     
     ui_status "success" "NocoDB integration hoàn tất!"
+    
+    # Show access info
+    local nocodb_url=$(get_nocodb_url)
+    ui_info_box "Truy cập NocoDB" \
+        "URL: $nocodb_url" \
+        "Email: $(config_get "nocodb.admin_email")" \
+        "Password: $(get_nocodb_admin_password)"
+    
     return 0
 }
+
+get_nocodb_url() {
+    local domain=$(config_get "nocodb.domain" "")
+    if [[ -n "$domain" ]]; then
+        echo "https://$domain"
+    else
+        local main_domain=$(config_get "n8n.domain" "")
+        if [[ -n "$main_domain" ]]; then
+            echo "https://db.$main_domain"
+        else
+            local public_ip=$(get_public_ip || echo "localhost")
+            echo "http://$public_ip:8080"
+        fi
+    fi
+}
+
 
 # ===== SECRETS GENERATION =====
 
@@ -149,57 +170,288 @@ update_docker_compose_for_nocodb() {
 
 add_nocodb_service_to_compose() {
     local compose_file="$1"
-    local temp_file="/tmp/docker-compose-nocodb.yml"
+    local temp_file="/tmp/docker-compose-nocodb-$(date +%s).yml"
     
     # Create backup
-    cp "$compose_file" "${compose_file}.backup"
+    cp "$compose_file" "${compose_file}.backup.$(date +%s)"
     
-    # Use sed to insert NocoDB service before volumes section
-    sed '/^volumes:/i\
-  # NocoDB Database Manager - Added by DataOnline Manager\
-  nocodb:\
-    image: nocodb/nocodb:latest\
-    container_name: n8n-nocodb\
-    restart: unless-stopped\
-    environment:\
-      - NC_DB=pg://n8n:${POSTGRES_PASSWORD}@postgres:5432/n8n\
-      - NC_PUBLIC_URL=${NOCODB_PUBLIC_URL}\
-      - NC_AUTH_JWT_SECRET=${NOCODB_JWT_SECRET}\
-      - NC_ADMIN_EMAIL=${NOCODB_ADMIN_EMAIL}\
-      - NC_ADMIN_PASSWORD=${NOCODB_ADMIN_PASSWORD}\
-      - NC_DISABLE_TELE=true\
-      - NC_DASHBOARD_URL=/dashboard\
-      - DATABASE_URL=postgres://n8n:${POSTGRES_PASSWORD}@postgres:5432/n8n\
-    ports:\
-      - "8080:8080"\
-    depends_on:\
-      postgres:\
-        condition: service_healthy\
-    volumes:\
-      - nocodb_data:/usr/app/data\
-      - ./nocodb-config:/usr/app/config\
-    networks:\
-      - n8n-network\
-    healthcheck:\
-      test: ["CMD", "curl", "-f", "http://localhost:8080/api/v1/health"]\
-      interval: 30s\
-      timeout: 10s\
-      retries: 3\
-      start_period: 60s\
-' "$compose_file" > "$temp_file"
+    # Source environment variables
+    set -a  # automatically export all variables
+    source /opt/n8n/.env
+    set +a
     
-    # Validate the new compose file
+    # Create complete new compose file with NocoDB
+    envsubst < /dev/stdin > "$temp_file" << 'EOF'
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: n8n-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=n8n
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=n8n
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U n8n"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - n8n-network
+
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: n8n
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - N8N_HOST=${N8N_DOMAIN:-localhost}
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=${N8N_PROTOCOL:-https}
+      - NODE_ENV=production
+      - WEBHOOK_URL=${N8N_WEBHOOK_URL}
+      - GENERIC_TIMEZONE=Asia/Ho_Chi_Minh
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=postgres
+      - DB_POSTGRESDB_PORT=5432
+      - DB_POSTGRESDB_DATABASE=n8n
+      - DB_POSTGRESDB_USER=n8n
+      - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
+      - EXECUTIONS_MODE=regular
+      - EXECUTIONS_PROCESS=main
+      - N8N_BASIC_AUTH_ACTIVE=true
+      - N8N_BASIC_AUTH_USER=admin
+      - N8N_BASIC_AUTH_PASSWORD=changeme
+      - N8N_METRICS=false
+    ports:
+      - "5678:5678"
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./backups:/backups
+    networks:
+      - n8n-network
+
+  nocodb:
+    image: nocodb/nocodb:latest
+    container_name: n8n-nocodb
+    restart: unless-stopped
+    environment:
+      - NC_DB=pg://n8n:${POSTGRES_PASSWORD}@postgres:5432/n8n
+      - NC_PUBLIC_URL=${NOCODB_PUBLIC_URL}
+      - NC_AUTH_JWT_SECRET=${NOCODB_JWT_SECRET}
+      - NC_ADMIN_EMAIL=${NOCODB_ADMIN_EMAIL}
+      - NC_ADMIN_PASSWORD=${NOCODB_ADMIN_PASSWORD}
+      - NC_DISABLE_TELE=true
+      - NC_DASHBOARD_URL=/dashboard
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - nocodb_data:/usr/app/data
+      - ./nocodb-config:/usr/app/config
+    networks:
+      - n8n-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+volumes:
+  postgres_data:
+    driver: local
+  n8n_data:
+    driver: local
+  nocodb_data:
+    driver: local
+
+networks:
+  n8n-network:
+    driver: bridge
+EOF
+
+    # Validate and replace
     if docker compose -f "$temp_file" config >/dev/null 2>&1; then
         mv "$temp_file" "$compose_file"
-        rm -f "${compose_file}.backup"
         return 0
     else
-        # Restore backup on failure
-        mv "${compose_file}.backup" "$compose_file"
         rm -f "$temp_file"
         return 1
     fi
 }
+
+# ===== SSL SUBDOMAIN SETUP =====
+
+setup_nocodb_ssl() {
+    local main_domain=$(config_get "n8n.domain" "")
+    local subdomain="db.$main_domain"
+    
+    if [[ -z "$main_domain" ]]; then
+        echo -n -e "${UI_WHITE}Nhập domain chính (VD: n8n-store.xyz): ${UI_NC}"
+        read -r main_domain
+        config_set "n8n.domain" "$main_domain"
+        subdomain="db.$main_domain"
+    fi
+    
+    ui_info_box "SSL Setup cho NocoDB" \
+        "Domain: $subdomain" \
+        "Port: 8080 → 443" \
+        "Certificate: Let's Encrypt"
+    
+    if ! ui_confirm "Setup SSL cho $subdomain?"; then
+        return 0
+    fi
+    
+    # Create nginx config
+    create_nocodb_nginx_config "$subdomain"
+    
+    # Get SSL certificate
+    obtain_nocodb_ssl_certificate "$subdomain"
+    
+    # Update NocoDB config
+    update_nocodb_ssl_config "$subdomain"
+}
+
+create_nocodb_nginx_config() {
+    local subdomain="$1"
+    local nginx_conf="/etc/nginx/sites-available/${subdomain}.conf"
+    
+    ui_start_spinner "Tạo Nginx config cho $subdomain"
+    
+    cat > "$nginx_conf" << EOF
+server {
+    listen 80;
+    server_name $subdomain;
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/html;
+        allow all;
+    }
+
+    location / {
+        return 301 https://\$host\$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl http2;
+    server_name $subdomain;
+
+    ssl_certificate /etc/letsencrypt/live/$subdomain/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/$subdomain/privkey.pem;
+    
+    include /etc/letsencrypt/options-ssl-nginx.conf;
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+
+    client_max_body_size 100M;
+    
+    access_log /var/log/nginx/$subdomain.access.log;
+    error_log /var/log/nginx/$subdomain.error.log;
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_cache_bypass \$http_upgrade;
+        
+        proxy_buffering off;
+        proxy_read_timeout 7200s;
+        proxy_send_timeout 7200s;
+    }
+}
+EOF
+
+    # Enable site
+    ln -sf "$nginx_conf" /etc/nginx/sites-enabled/
+    
+    ui_stop_spinner
+    ui_status "success" "Nginx config tạo thành công"
+}
+
+obtain_nocodb_ssl_certificate() {
+    local subdomain="$1"
+    local email="admin@$(config_get "n8n.domain")"
+    
+    # Ensure webroot exists
+    mkdir -p /var/www/html/.well-known/acme-challenge
+    chown -R www-data:www-data /var/www/html
+    
+    # Test nginx config
+    if ! nginx -t; then
+        ui_status "error" "Nginx config có lỗi"
+        return 1
+    fi
+    
+    # Reload nginx
+    systemctl reload nginx
+    
+    ui_start_spinner "Lấy SSL certificate cho $subdomain"
+    
+    if certbot certonly --webroot \
+        -w /var/www/html \
+        -d "$subdomain" \
+        --agree-tos \
+        --email "$email" \
+        --non-interactive; then
+        ui_stop_spinner
+        ui_status "success" "SSL certificate thành công"
+    else
+        ui_stop_spinner
+        ui_status "error" "SSL certificate thất bại"
+        return 1
+    fi
+    
+    # Download SSL options if needed
+    if [[ ! -f /etc/letsencrypt/options-ssl-nginx.conf ]]; then
+        curl -s https://raw.githubusercontent.com/certbot/certbot/master/certbot-nginx/certbot_nginx/_internal/tls_configs/options-ssl-nginx.conf \
+            -o /etc/letsencrypt/options-ssl-nginx.conf
+    fi
+    
+    if [[ ! -f /etc/letsencrypt/ssl-dhparams.pem ]]; then
+        openssl dhparam -out /etc/letsencrypt/ssl-dhparams.pem 2048
+    fi
+    
+    # Reload nginx with SSL
+    systemctl reload nginx
+}
+
+update_nocodb_ssl_config() {
+    local subdomain="$1"
+    
+    ui_start_spinner "Cập nhật NocoDB config"
+    
+    # Update .env
+    sed -i "s|NOCODB_PUBLIC_URL=.*|NOCODB_PUBLIC_URL=https://$subdomain|" "$N8N_COMPOSE_DIR/.env"
+    
+    # Save to manager config
+    config_set "nocodb.domain" "$subdomain"
+    config_set "nocodb.ssl_enabled" "true"
+    
+    # Restart NocoDB
+    cd "$N8N_COMPOSE_DIR"
+    docker compose restart nocodb
+    
+    ui_stop_spinner
+    ui_status "success" "NocoDB config cập nhật thành công"
+}
+
 
 insert_nocodb_service() {
     local compose_file="$1"

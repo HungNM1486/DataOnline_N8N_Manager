@@ -49,6 +49,7 @@ database_manager_main() {
         7) nocodb_maintenance ;;
         8) show_nocodb_logs ;;
         9) uninstall_nocodb ;;
+        10) setup_nocodb_ssl ;; 
         0) return 0 ;;
         *) ui_status "error" "Lựa chọn không hợp lệ" ;;
         esac
@@ -83,6 +84,7 @@ show_database_manager_menu() {
     echo "7) 🔧 Bảo trì & tối ưu"
     echo "8) 📝 Xem logs"
     echo "9) 🗑️  Gỡ cài đặt NocoDB"
+    echo "10) 🔒 Cài đặt SSL cho NocoDB"
     echo "0) ⬅️  Quay lại"
     echo ""
 }
