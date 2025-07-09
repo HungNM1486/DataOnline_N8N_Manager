@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# DataOnline N8N Manager - NocoDB Setup & Docker Integration
-# Phiên bản: 1.0.0
+# DataOnline N8N Manager - NocoDB Setup & Docker Integration (FIXED)
+# Phiên bản: 1.0.1 - Fixed database connection issue
 
 set -euo pipefail
 
@@ -37,7 +37,7 @@ setup_nocodb_integration() {
         return 1
     fi
     
-    # NEW: SSL setup option
+    # SSL setup option
     echo ""
     echo -n -e "${UI_YELLOW}Cấu hình SSL cho subdomain? [Y/n]: ${UI_NC}"
     read -r setup_ssl
@@ -72,7 +72,6 @@ get_nocodb_url() {
     fi
 }
 
-
 # ===== SECRETS GENERATION =====
 
 generate_nocodb_secrets() {
@@ -98,6 +97,18 @@ NOCODB_JWT_SECRET=$jwt_secret
 NOCODB_ADMIN_EMAIL=$admin_email
 NOCODB_ADMIN_PASSWORD=$admin_password
 NOCODB_PUBLIC_URL=https://db.$(config_get "n8n.domain" "localhost")
+
+# NocoDB Database Configuration - Separate Variables (FIXED)
+NC_DB_TYPE=pg
+NC_DB_HOST=postgres
+NC_DB_PORT=5432
+NC_DB_USER=n8n
+NC_DB_DATABASE=n8n
+NC_DB_SSL=false
+NC_DB_MIGRATE=true
+NC_DB_MIGRATE_LOCK=true
+NC_MIN_DB_POOL_SIZE=1
+NC_MAX_DB_POOL_SIZE=10
 EOF
     fi
     
@@ -168,6 +179,7 @@ update_docker_compose_for_nocodb() {
     fi
 }
 
+# FIXED: Use separate environment variables instead of connection string
 add_nocodb_service_to_compose() {
     local compose_file="$1"
     local temp_file="/tmp/docker-compose-nocodb-$(date +%s).yml"
@@ -180,7 +192,7 @@ add_nocodb_service_to_compose() {
     source /opt/n8n/.env
     set +a
     
-    # Create complete new compose file with NocoDB
+    # Create complete new compose file with NocoDB using separate environment variables
     envsubst < /dev/stdin > "$temp_file" << 'EOF'
 version: '3.8'
 
@@ -244,13 +256,34 @@ services:
     container_name: n8n-nocodb
     restart: unless-stopped
     environment:
-      - NC_DB=pg://n8n:${POSTGRES_PASSWORD}@postgres:5432/n8n
+      # Database connection using separate variables (FIXED)
+      - NC_DB_TYPE=pg
+      - NC_DB_HOST=postgres
+      - NC_DB_PORT=5432
+      - NC_DB_USER=n8n
+      - NC_DB_PASSWORD=${POSTGRES_PASSWORD}
+      - NC_DB_DATABASE=n8n
+      - NC_DB_SSL=false
+      
+      # Database migration settings
+      - NC_DB_MIGRATE=true
+      - NC_DB_MIGRATE_LOCK=true
+      - NC_MIN_DB_POOL_SIZE=1
+      - NC_MAX_DB_POOL_SIZE=10
+      
+      # NocoDB configuration
       - NC_PUBLIC_URL=${NOCODB_PUBLIC_URL}
       - NC_AUTH_JWT_SECRET=${NOCODB_JWT_SECRET}
       - NC_ADMIN_EMAIL=${NOCODB_ADMIN_EMAIL}
       - NC_ADMIN_PASSWORD=${NOCODB_ADMIN_PASSWORD}
       - NC_DISABLE_TELE=true
       - NC_DASHBOARD_URL=/dashboard
+      
+      # Additional configuration
+      - NC_TOOL_DIR=/tmp/nc-tool
+      - NC_LOG_LEVEL=info
+      - NODE_ENV=production
+      
     ports:
       - "8080:8080"
     depends_on:
@@ -265,8 +298,8 @@ services:
       test: ["CMD", "curl", "-f", "http://localhost:8080/api/v1/health"]
       interval: 30s
       timeout: 10s
-      retries: 3
-      start_period: 60s
+      retries: 5
+      start_period: 120s
 
 volumes:
   postgres_data:
@@ -287,6 +320,129 @@ EOF
         return 0
     else
         rm -f "$temp_file"
+        return 1
+    fi
+}
+
+add_nocodb_volume() {
+    local compose_file="$1"
+    
+    # Add nocodb_data volume if not exists
+    if ! grep -q "nocodb_data:" "$compose_file"; then
+        # Find volumes section and add nocodb_data
+        if grep -q "^volumes:" "$compose_file"; then
+            # Volumes section exists, add nocodb_data
+            sed -i '/^volumes:/a\  nocodb_data:\n    driver: local' "$compose_file"
+        else
+            # No volumes section, add it
+            echo "" >> "$compose_file"
+            echo "volumes:" >> "$compose_file"
+            echo "  nocodb_data:" >> "$compose_file"
+            echo "    driver: local" >> "$compose_file"
+        fi
+    fi
+}
+
+# ===== SERVICE MANAGEMENT =====
+
+start_nocodb_service() {
+    ui_start_spinner "Khởi động NocoDB service"
+    
+    cd "$N8N_COMPOSE_DIR" || return 1
+    
+    # Pull NocoDB image first
+    if ! docker compose pull nocodb 2>/dev/null; then
+        ui_stop_spinner
+        ui_status "error" "Không thể pull NocoDB image"
+        return 1
+    fi
+    
+    # Start NocoDB service
+    if ! docker compose up -d nocodb 2>/dev/null; then
+        ui_stop_spinner
+        ui_status "error" "Không thể khởi động NocoDB"
+        return 1
+    fi
+    
+    ui_stop_spinner
+    ui_status "success" "NocoDB service đã khởi động"
+    return 0
+}
+
+# ENHANCED: Better wait function with detailed logging
+wait_for_nocodb_ready() {
+    ui_start_spinner "Chờ NocoDB sẵn sàng"
+    
+    local max_wait=300  # 5 minutes for initialization
+    local waited=0
+    local health_url="http://localhost:8080/api/v1/health"
+    local check_interval=10
+    
+    while [[ $waited -lt $max_wait ]]; do
+        # Check if container is running
+        if ! docker ps --format '{{.Names}}' | grep -q "^n8n-nocodb$"; then
+            ui_stop_spinner
+            ui_status "error" "NocoDB container stopped unexpectedly"
+            
+            # Show recent logs
+            echo "Recent logs:"
+            docker logs --tail 10 n8n-nocodb 2>&1 | head -10
+            return 1
+        fi
+        
+        # Check container health
+        local container_status=$(docker inspect n8n-nocodb --format='{{.State.Status}}' 2>/dev/null || echo "unknown")
+        local container_health=$(docker inspect n8n-nocodb --format='{{.State.Health.Status}}' 2>/dev/null || echo "none")
+        
+        # Check API health
+        if curl -s -f "$health_url" >/dev/null 2>&1; then
+            ui_stop_spinner
+            ui_status "success" "NocoDB đã sẵn sàng"
+            return 0
+        fi
+        
+        # Check for database connection errors in logs
+        if docker logs --tail 5 n8n-nocodb 2>&1 | grep -i "database.*error\|connection.*failed\|Meta database configuration"; then
+            ui_stop_spinner
+            ui_status "error" "NocoDB database connection failed"
+            echo "Recent error logs:"
+            docker logs --tail 10 n8n-nocodb 2>&1 | grep -i "error\|exception" | head -5
+            return 1
+        fi
+        
+        sleep $check_interval
+        ((waited += check_interval))
+    done
+    
+    ui_stop_spinner
+    ui_status "error" "Timeout chờ NocoDB khởi động"
+    
+    # Show debug information
+    echo "Debug information:"
+    echo "Container status: $(docker inspect n8n-nocodb --format='{{.State.Status}}' 2>/dev/null || echo 'unknown')"
+    echo "Recent logs:"
+    docker logs --tail 10 n8n-nocodb 2>&1 | head -10
+    
+    return 1
+}
+
+configure_nocodb_database() {
+    ui_start_spinner "Cấu hình kết nối database"
+    
+    # NocoDB will auto-connect via environment variables
+    # Just verify the connection works
+    local api_url="http://localhost:8080/api/v1/db/meta/projects"
+    
+    # Wait a bit for database initialization
+    sleep 5
+    
+    if curl -s "$api_url" >/dev/null 2>&1; then
+        ui_stop_spinner
+        ui_status "success" "Database connection OK"
+        return 0
+    else
+        ui_stop_spinner
+        ui_status "error" "Database connection failed"
         return 1
     fi
 }
@@ -450,214 +606,6 @@ update_nocodb_ssl_config() {
     
     ui_stop_spinner
     ui_status "success" "NocoDB config cập nhật thành công"
-}
-
-
-insert_nocodb_service() {
-    local compose_file="$1"
-    local nocodb_config="$2"
-    local temp_compose="/tmp/docker-compose-updated.yml"
-    
-    # Create backup of original
-    cp "$compose_file" "${compose_file}.backup"
-    
-    # Find where to insert NocoDB service (after n8n service)
-    # We'll insert it before the "volumes:" section
-    if grep -q "^volumes:" "$compose_file"; then
-        # Insert before volumes section
-        sed '/^volumes:/i\
-  # NocoDB Database Manager - Added by DataOnline Manager\
-  nocodb:\
-    image: nocodb/nocodb:latest\
-    container_name: n8n-nocodb\
-    restart: unless-stopped\
-    environment:\
-      - NC_DB=pg://n8n:${POSTGRES_PASSWORD}@postgres:5432/n8n\
-      - NC_PUBLIC_URL=${NOCODB_PUBLIC_URL}\
-      - NC_AUTH_JWT_SECRET=${NOCODB_JWT_SECRET}\
-      - NC_ADMIN_EMAIL=${NOCODB_ADMIN_EMAIL}\
-      - NC_ADMIN_PASSWORD=${NOCODB_ADMIN_PASSWORD}\
-      - NC_DISABLE_TELE=true\
-      - NC_DASHBOARD_URL=/dashboard\
-      - DATABASE_URL=postgres://n8n:${POSTGRES_PASSWORD}@postgres:5432/n8n\
-    ports:\
-      - "8080:8080"\
-    depends_on:\
-      postgres:\
-        condition: service_healthy\
-    volumes:\
-      - nocodb_data:/usr/app/data\
-      - ./nocodb-config:/usr/app/config\
-    networks:\
-      - n8n-network\
-    healthcheck:\
-      test: ["CMD", "curl", "-f", "http://localhost:8080/api/v1/health"]\
-      interval: 30s\
-      timeout: 10s\
-      retries: 3\
-      start_period: 60s\
-' "$compose_file" > "$temp_compose"
-    else
-        # No volumes section, add service at end of services
-        awk '
-            /^networks:/ { 
-                print ""
-                print "  # NocoDB Database Manager - Added by DataOnline Manager"
-                print "  nocodb:"
-                print "    image: nocodb/nocodb:latest"
-                print "    container_name: n8n-nocodb"
-                print "    restart: unless-stopped"
-                print "    environment:"
-                print "      - NC_DB=pg://n8n:${POSTGRES_PASSWORD}@postgres:5432/n8n"
-                print "      - NC_PUBLIC_URL=${NOCODB_PUBLIC_URL}"
-                print "      - NC_AUTH_JWT_SECRET=${NOCODB_JWT_SECRET}"
-                print "      - NC_ADMIN_EMAIL=${NOCODB_ADMIN_EMAIL}"
-                print "      - NC_ADMIN_PASSWORD=${NOCODB_ADMIN_PASSWORD}"
-                print "      - NC_DISABLE_TELE=true"
-                print "      - NC_DASHBOARD_URL=/dashboard"
-                print "      - DATABASE_URL=postgres://n8n:${POSTGRES_PASSWORD}@postgres:5432/n8n"
-                print "    ports:"
-                print "      - \"8080:8080\""
-                print "    depends_on:"
-                print "      postgres:"
-                print "        condition: service_healthy"
-                print "    volumes:"
-                print "      - nocodb_data:/usr/app/data"
-                print "      - ./nocodb-config:/usr/app/config"
-                print "    networks:"
-                print "      - n8n-network"
-                print "    healthcheck:"
-                print "      test: [\"CMD\", \"curl\", \"-f\", \"http://localhost:8080/api/v1/health\"]"
-                print "      interval: 30s"
-                print "      timeout: 10s"
-                print "      retries: 3"
-                print "      start_period: 60s"
-                print ""
-            }
-            { print }
-        ' "$compose_file" > "$temp_compose"
-    fi
-    
-    # Validate the new compose file
-    if docker compose -f "$temp_compose" config >/dev/null 2>&1; then
-        mv "$temp_compose" "$compose_file"
-        return 0
-    else
-        # Restore backup on failure
-        mv "${compose_file}.backup" "$compose_file"
-        rm -f "$temp_compose"
-        return 1
-    fi
-}
-
-add_nocodb_volume() {
-    local compose_file="$1"
-    
-    # Add nocodb_data volume if not exists
-    if ! grep -q "nocodb_data:" "$compose_file"; then
-        # Find volumes section and add nocodb_data
-        if grep -q "^volumes:" "$compose_file"; then
-            # Volumes section exists, add nocodb_data
-            sed -i '/^volumes:/a\  nocodb_data:\n    driver: local' "$compose_file"
-        else
-            # No volumes section, add it
-            echo "" >> "$compose_file"
-            echo "volumes:" >> "$compose_file"
-            echo "  nocodb_data:" >> "$compose_file"
-            echo "    driver: local" >> "$compose_file"
-        fi
-    fi
-}
-
-# ===== SERVICE MANAGEMENT =====
-
-start_nocodb_service() {
-    ui_start_spinner "Khởi động NocoDB service"
-    
-    cd "$N8N_COMPOSE_DIR" || return 1
-    
-    # Pull NocoDB image first
-    if ! docker compose pull nocodb 2>/dev/null; then
-        ui_stop_spinner
-        ui_status "error" "Không thể pull NocoDB image"
-        return 1
-    fi
-    
-    # Start NocoDB service
-    if ! docker compose up -d nocodb 2>/dev/null; then
-        ui_stop_spinner
-        ui_status "error" "Không thể khởi động NocoDB"
-        return 1
-    fi
-    
-    ui_stop_spinner
-    ui_status "success" "NocoDB service đã khởi động"
-    return 0
-}
-
-wait_for_nocodb_ready() {
-    ui_start_spinner "Chờ NocoDB sẵn sàng"
-
-    local max_wait=30  # 30 seconds
-    local waited=0
-    local health_url="http://localhost:$NOCODB_PORT/api/v1/health"
-    
-    while [[ $waited -lt $max_wait ]]; do
-        if curl -s "$health_url" >/dev/null 2>&1; then
-            ui_stop_spinner
-            ui_status "success" "NocoDB đã sẵn sàng"
-            return 0
-        fi
-        
-        sleep 2
-        ((waited += 2))
-    done
-    
-    ui_stop_spinner
-    ui_status "error" "Timeout chờ NocoDB khởi động"
-    return 1
-}
-
-configure_nocodb_database() {
-    ui_start_spinner "Cấu hình kết nối database"
-    
-    # NocoDB will auto-connect via environment variables
-    # Just verify the connection works
-    local api_url="http://localhost:$NOCODB_PORT/api/v1/db/meta/projects"
-    
-    if curl -s "$api_url" >/dev/null 2>&1; then
-        ui_stop_spinner
-        ui_status "success" "Database connection OK"
-        return 0
-    else
-        ui_stop_spinner
-        ui_status "error" "Database connection failed"
-        return 1
-    fi
-}
-
-# ===== ROLLBACK FUNCTIONS =====
-
-rollback_docker_compose() {
-    ui_start_spinner "Rolling back docker-compose changes"
-    
-    local backup_dir="$N8N_COMPOSE_DIR/backups"
-    local latest_backup=$(ls -t "$backup_dir"/docker-compose.yml.backup_* 2>/dev/null | head -1)
-    
-    if [[ -n "$latest_backup" ]]; then
-        cp "$latest_backup" "$N8N_COMPOSE_DIR/docker-compose.yml"
-        
-        # Stop NocoDB if running
-        cd "$N8N_COMPOSE_DIR"
-        docker compose stop nocodb 2>/dev/null || true
-        docker compose rm -f nocodb 2>/dev/null || true
-        
-        ui_stop_spinner
-        ui_status "success" "Đã rollback docker-compose"
-    else
-        ui_stop_spinner
-        ui_status "error" "Không tìm thấy backup để rollback"
-    fi
 }
 
 # ===== REMOVAL FUNCTIONS =====
@@ -901,4 +849,4 @@ show_nocodb_logs() {
     0) return ;;
     *) ui_status "error" "Lựa chọn không hợp lệ" ;;
     esac
-}
+}   
