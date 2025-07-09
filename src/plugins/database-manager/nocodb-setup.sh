@@ -597,8 +597,8 @@ start_nocodb_service() {
 
 wait_for_nocodb_ready() {
     ui_start_spinner "Chờ NocoDB sẵn sàng"
-    
-    local max_wait=120  # 2 minutes
+
+    local max_wait=30  # 30 seconds
     local waited=0
     local health_url="http://localhost:$NOCODB_PORT/api/v1/health"
     
