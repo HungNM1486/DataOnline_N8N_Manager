@@ -1,18 +1,66 @@
 #!/bin/bash
 
-# DataOnline N8N Manager - NocoDB Setup & Docker Integration (FIXED)
-# Phiên bản: 1.0.1 - Fixed database connection issue
+# DataOnline N8N Manager - NocoDB Setup & Docker Integration
+# Phiên bản: 1.0.2 - Dual Database Options (Shared/Separate)
 
 set -euo pipefail
+
+# Global variables for database choice
+NOCODB_DATABASE_MODE=""  # "shared" or "separate"
+NOCODB_DB_NAME=""
+NOCODB_DB_PASSWORD=""
+
+# ===== DATABASE PREFERENCE SELECTION =====
+
+ask_database_preference() {
+    ui_section "Lựa chọn Database cho NocoDB"
+    
+    echo "📊 **Lựa chọn database:**"
+    echo ""
+    echo "1) 🔗 Dùng chung database với N8N (đơn giản)"
+    echo "   ✅ Setup nhanh, ít tài nguyên"
+    echo "   ⚠️  Rủi ro: performance và security chung"
+    echo ""
+    echo "2) 🏠 Database riêng cho NocoDB (an toàn)"
+    echo "   ✅ Độc lập, an toàn hơn"
+    echo "   ⚠️  Phức tạp hơn, nhiều tài nguyên"
+    echo ""
+    
+    while true; do
+        read -p "Chọn [1-2]: " db_choice
+        
+        case "$db_choice" in
+        1)
+            NOCODB_DATABASE_MODE="shared"
+            NOCODB_DB_NAME="n8n"
+            ui_status "info" "Sử dụng database chung: n8n"
+            break
+            ;;
+        2)
+            NOCODB_DATABASE_MODE="separate"
+            NOCODB_DB_NAME="nocodb"
+            ui_status "info" "Sử dụng database riêng: nocodb"
+            break
+            ;;
+        *)
+            ui_status "error" "Lựa chọn không hợp lệ"
+            ;;
+        esac
+    done
+    
+    return 0
+}
 
 # ===== DOCKER INTEGRATION FUNCTIONS =====
 
 setup_nocodb_integration() {
     ui_section "Cài đặt NocoDB Integration"
 
-    NOCODB_PUBLIC_URL=https://db.${N8N_DOMAIN:-localhost}
+    # Ask database preference first
+    if ! ask_database_preference; then
+        return 1
+    fi
     
-    # Existing setup steps...
     if ! generate_nocodb_secrets; then
         return 1
     fi
@@ -52,7 +100,19 @@ setup_nocodb_integration() {
     ui_info_box "Truy cập NocoDB" \
         "URL: $nocodb_url" \
         "Email: $(config_get "nocodb.admin_email")" \
-        "Password: $(get_nocodb_admin_password)"
+        "Password: $(get_nocodb_admin_password)" \
+        "Database: $NOCODB_DATABASE_MODE ($NOCODB_DB_NAME)"
+    
+    # Show N8N database connection info for both modes
+    local n8n_postgres_password=$(grep "POSTGRES_PASSWORD=" "$N8N_COMPOSE_DIR/.env" | cut -d'=' -f2)
+    ui_info_box "Kết nối N8N Database trong NocoDB" \
+        "Host: postgres (hoặc IP server)" \
+        "Port: 5432" \
+        "Database: n8n" \
+        "User: n8n" \
+        "Password: $n8n_postgres_password" \
+        "" \
+        "💡 Sử dụng thông tin này để kết nối N8N data trong NocoDB"
     
     return 0
 }
@@ -81,6 +141,14 @@ generate_nocodb_secrets() {
     local admin_password=$(generate_random_string 16)
     local admin_email="admin@$(config_get "n8n.domain" "localhost")"
     
+    # Generate database password for separate mode
+    if [[ "$NOCODB_DATABASE_MODE" == "separate" ]]; then
+        NOCODB_DB_PASSWORD=$(generate_random_string 32)
+    else
+        # Use N8N's postgres password for shared mode
+        NOCODB_DB_PASSWORD=$(grep "POSTGRES_PASSWORD=" "$N8N_COMPOSE_DIR/.env" | cut -d'=' -f2)
+    fi
+    
     # Check if .env exists
     if [[ ! -f "$N8N_COMPOSE_DIR/.env" ]]; then
         ui_stop_spinner
@@ -93,17 +161,19 @@ generate_nocodb_secrets() {
         cat >> "$N8N_COMPOSE_DIR/.env" << EOF
 
 # NocoDB Configuration - Added by DataOnline Manager
+NOCODB_DATABASE_MODE=$NOCODB_DATABASE_MODE
 NOCODB_JWT_SECRET=$jwt_secret
 NOCODB_ADMIN_EMAIL=$admin_email
 NOCODB_ADMIN_PASSWORD=$admin_password
 NOCODB_PUBLIC_URL=https://db.$(config_get "n8n.domain" "localhost")
 
-# NocoDB Database Configuration - Separate Variables (FIXED)
+# NocoDB Database Configuration
 NC_DB_TYPE=pg
 NC_DB_HOST=postgres
 NC_DB_PORT=5432
-NC_DB_USER=n8n
-NC_DB_DATABASE=n8n
+NC_DB_USER=nocodb
+NC_DB_PASSWORD=$NOCODB_DB_PASSWORD
+NC_DB_DATABASE=$NOCODB_DB_NAME
 NC_DB_SSL=false
 NC_DB_MIGRATE=true
 NC_DB_MIGRATE_LOCK=true
@@ -118,11 +188,13 @@ EOF
     
     # Update config
     config_set "nocodb.admin_email" "$admin_email"
+    config_set "nocodb.database_mode" "$NOCODB_DATABASE_MODE"
+    config_set "nocodb.database_name" "$NOCODB_DB_NAME"
     config_set "nocodb.installed" "true"
     config_set "nocodb.installed_date" "$(date -Iseconds)"
     
     ui_stop_spinner
-    ui_status "success" "Secrets đã được tạo"
+    ui_status "success" "Secrets đã được tạo (mode: $NOCODB_DATABASE_MODE)"
     return 0
 }
 
@@ -170,7 +242,7 @@ update_docker_compose_for_nocodb() {
         # Add nocodb volume if not exists
         add_nocodb_volume "$compose_file"
         ui_stop_spinner
-        ui_status "success" "docker-compose.yml đã được cập nhật"
+        ui_status "success" "docker-compose.yml đã được cập nhật (mode: $NOCODB_DATABASE_MODE)"
         return 0
     else
         ui_stop_spinner
@@ -179,7 +251,7 @@ update_docker_compose_for_nocodb() {
     fi
 }
 
-# FIXED: Use separate environment variables instead of connection string
+# Updated: Support both shared and separate database modes
 add_nocodb_service_to_compose() {
     local compose_file="$1"
     local temp_file="/tmp/docker-compose-nocodb-$(date +%s).yml"
@@ -192,7 +264,27 @@ add_nocodb_service_to_compose() {
     source /opt/n8n/.env
     set +a
     
-    # Create complete new compose file with NocoDB using separate environment variables
+    # Create compose template based on database mode
+    if [[ "$NOCODB_DATABASE_MODE" == "separate" ]]; then
+        create_separate_database_compose "$temp_file"
+    else
+        create_shared_database_compose "$temp_file"
+    fi
+    
+    # Validate and replace
+    if docker compose -f "$temp_file" config >/dev/null 2>&1; then
+        mv "$temp_file" "$compose_file"
+        return 0
+    else
+        rm -f "$temp_file"
+        return 1
+    fi
+}
+
+# Create compose for separate database mode
+create_separate_database_compose() {
+    local temp_file="$1"
+    
     envsubst < /dev/stdin > "$temp_file" << 'EOF'
 version: '3.8'
 
@@ -256,7 +348,133 @@ services:
     container_name: n8n-nocodb
     restart: unless-stopped
     environment:
-      # Database connection using separate variables (FIXED)
+      # Database connection using separate variables
+      - NC_DB_TYPE=pg
+      - NC_DB_HOST=postgres
+      - NC_DB_PORT=5432
+      - NC_DB_USER=nocodb
+      - NC_DB_PASSWORD=${NOCODB_DB_PASSWORD}
+      - NC_DB_DATABASE=nocodb
+      - NC_DB_SSL=false
+      
+      # Database migration settings
+      - NC_DB_MIGRATE=true
+      - NC_DB_MIGRATE_LOCK=true
+      - NC_MIN_DB_POOL_SIZE=1
+      - NC_MAX_DB_POOL_SIZE=10
+      
+      # NocoDB configuration
+      - NC_PUBLIC_URL=${NOCODB_PUBLIC_URL}
+      - NC_AUTH_JWT_SECRET=${NOCODB_JWT_SECRET}
+      - NC_ADMIN_EMAIL=${NOCODB_ADMIN_EMAIL}
+      - NC_ADMIN_PASSWORD=${NOCODB_ADMIN_PASSWORD}
+      - NC_DISABLE_TELE=true
+      - NC_DASHBOARD_URL=/dashboard
+      
+      # Additional configuration
+      - NC_TOOL_DIR=/tmp/nc-tool
+      - NC_LOG_LEVEL=info
+      - NODE_ENV=production
+      
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - nocodb_data:/usr/app/data
+      - ./nocodb-config:/usr/app/config
+    networks:
+      - n8n-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+
+volumes:
+  postgres_data:
+    driver: local
+  n8n_data:
+    driver: local
+  nocodb_data:
+    driver: local
+
+networks:
+  n8n-network:
+    driver: bridge
+EOF
+}
+
+# Create compose for shared database mode
+create_shared_database_compose() {
+    local temp_file="$1"
+    
+    envsubst < /dev/stdin > "$temp_file" << 'EOF'
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: n8n-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=n8n
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=n8n
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U n8n"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - n8n-network
+
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: n8n
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - N8N_HOST=${N8N_DOMAIN:-localhost}
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=${N8N_PROTOCOL:-https}
+      - NODE_ENV=production
+      - WEBHOOK_URL=${N8N_WEBHOOK_URL}
+      - GENERIC_TIMEZONE=Asia/Ho_Chi_Minh
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=postgres
+      - DB_POSTGRESDB_PORT=5432
+      - DB_POSTGRESDB_DATABASE=n8n
+      - DB_POSTGRESDB_USER=n8n
+      - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
+      - EXECUTIONS_MODE=regular
+      - EXECUTIONS_PROCESS=main
+      - N8N_BASIC_AUTH_ACTIVE=true
+      - N8N_BASIC_AUTH_USER=admin
+      - N8N_BASIC_AUTH_PASSWORD=changeme
+      - N8N_METRICS=false
+    ports:
+      - "5678:5678"
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./backups:/backups
+    networks:
+      - n8n-network
+
+  nocodb:
+    image: nocodb/nocodb:latest
+    container_name: n8n-nocodb
+    restart: unless-stopped
+    environment:
+      # Database connection using shared N8N database
       - NC_DB_TYPE=pg
       - NC_DB_HOST=postgres
       - NC_DB_PORT=5432
@@ -313,15 +531,6 @@ networks:
   n8n-network:
     driver: bridge
 EOF
-
-    # Validate and replace
-    if docker compose -f "$temp_file" config >/dev/null 2>&1; then
-        mv "$temp_file" "$compose_file"
-        return 0
-    else
-        rm -f "$temp_file"
-        return 1
-    fi
 }
 
 add_nocodb_volume() {
@@ -350,6 +559,11 @@ start_nocodb_service() {
     
     cd "$N8N_COMPOSE_DIR" || return 1
     
+    # Create separate database if needed
+    if [[ "$NOCODB_DATABASE_MODE" == "separate" ]]; then
+        create_separate_nocodb_database
+    fi
+    
     # Pull NocoDB image first
     if ! docker compose pull nocodb 2>/dev/null; then
         ui_stop_spinner
@@ -369,7 +583,36 @@ start_nocodb_service() {
     return 0
 }
 
-# ENHANCED: Better wait function with detailed logging
+# Create separate database for NocoDB
+create_separate_nocodb_database() {
+    ui_info "Tạo database riêng cho NocoDB..."
+    
+    # Wait for PostgreSQL to be ready
+    local max_wait=30
+    local waited=0
+    
+    while [[ $waited -lt $max_wait ]]; do
+        if docker exec n8n-postgres pg_isready -U n8n >/dev/null 2>&1; then
+            break
+        fi
+        sleep 1
+        ((waited++))
+    done
+    
+    # Create nocodb user and database
+    docker exec n8n-postgres psql -U n8n -c "
+        CREATE USER nocodb WITH PASSWORD '$NOCODB_DB_PASSWORD';
+        CREATE DATABASE nocodb OWNER nocodb;
+        GRANT ALL PRIVILEGES ON DATABASE nocodb TO nocodb;
+    " >/dev/null 2>&1 || {
+        # Database/user might already exist, which is fine
+        ui_status "info" "Database/user nocodb đã tồn tại hoặc đã được tạo"
+    }
+    
+    ui_status "success" "Database riêng cho NocoDB đã sẵn sàng"
+}
+
+# Enhanced wait function with database mode awareness
 wait_for_nocodb_ready() {
     ui_start_spinner "Chờ NocoDB sẵn sàng"
     
@@ -397,7 +640,7 @@ wait_for_nocodb_ready() {
         # Check API health
         if curl -s -f "$health_url" >/dev/null 2>&1; then
             ui_stop_spinner
-            ui_status "success" "NocoDB đã sẵn sàng"
+            ui_status "success" "NocoDB đã sẵn sàng (database: $NOCODB_DATABASE_MODE)"
             return 0
         fi
         
@@ -420,6 +663,7 @@ wait_for_nocodb_ready() {
     # Show debug information
     echo "Debug information:"
     echo "Container status: $(docker inspect n8n-nocodb --format='{{.State.Status}}' 2>/dev/null || echo 'unknown')"
+    echo "Database mode: $NOCODB_DATABASE_MODE"
     echo "Recent logs:"
     docker logs --tail 10 n8n-nocodb 2>&1 | head -10
     
@@ -438,7 +682,7 @@ configure_nocodb_database() {
     
     if curl -s "$api_url" >/dev/null 2>&1; then
         ui_stop_spinner
-        ui_status "success" "Database connection OK"
+        ui_status "success" "Database connection OK (mode: $NOCODB_DATABASE_MODE)"
         return 0
     else
         ui_stop_spinner
@@ -613,6 +857,13 @@ update_nocodb_ssl_config() {
 remove_nocodb_integration() {
     ui_section "Gỡ bỏ NocoDB integration"
     
+    local database_mode=$(config_get "nocodb.database_mode" "shared")
+    
+    ui_info_box "Thông tin gỡ bỏ" \
+        "Database mode: $database_mode" \
+        "$([ "$database_mode" == "separate" ] && echo "Database riêng sẽ được xóa")" \
+        "$([ "$database_mode" == "shared" ] && echo "Chỉ xóa NocoDB tables trong database N8N")"
+    
     # Stop and remove NocoDB container
     if ! stop_and_remove_nocodb; then
         ui_status "error" "Không thể dừng NocoDB container"
@@ -625,8 +876,23 @@ remove_nocodb_integration() {
         return 1
     fi
     
+    # Handle database cleanup based on mode
+    if [[ "$database_mode" == "separate" ]]; then
+        echo -n -e "${UI_YELLOW}Xóa database riêng của NocoDB? [y/N]: ${UI_NC}"
+        read -r remove_db
+        if [[ "$remove_db" =~ ^[Yy]$ ]]; then
+            remove_separate_nocodb_database
+        fi
+    else
+        echo -n -e "${UI_YELLOW}Xóa NocoDB tables trong database N8N? [y/N]: ${UI_NC}"
+        read -r remove_tables
+        if [[ "$remove_tables" =~ ^[Yy]$ ]]; then
+            remove_nocodb_tables_from_shared_db
+        fi
+    fi
+    
     # Clean up volumes (optional)
-    echo -n -e "${UI_YELLOW}Xóa dữ liệu NocoDB? [y/N]: ${UI_NC}"
+    echo -n -e "${UI_YELLOW}Xóa NocoDB volumes? [y/N]: ${UI_NC}"
     read -r remove_data
     if [[ "$remove_data" =~ ^[Yy]$ ]]; then
         remove_nocodb_data
@@ -637,6 +903,39 @@ remove_nocodb_integration() {
     
     ui_status "success" "NocoDB đã được gỡ bỏ hoàn toàn"
     return 0
+}
+
+remove_separate_nocodb_database() {
+    ui_start_spinner "Xóa database riêng của NocoDB"
+    
+    docker exec n8n-postgres psql -U n8n -c "
+        DROP DATABASE IF EXISTS nocodb;
+        DROP USER IF EXISTS nocodb;
+    " >/dev/null 2>&1 || true
+    
+    ui_stop_spinner
+    ui_status "success" "Database riêng đã được xóa"
+}
+
+remove_nocodb_tables_from_shared_db() {
+    ui_start_spinner "Xóa NocoDB tables từ database N8N"
+    
+    # Get list of NocoDB tables (they usually start with 'nc_')
+    local nocodb_tables=$(docker exec n8n-postgres psql -U n8n n8n -t -c "
+        SELECT tablename FROM pg_tables 
+        WHERE schemaname = 'public' AND tablename LIKE 'nc_%';
+    " | tr -d ' ')
+    
+    if [[ -n "$nocodb_tables" ]]; then
+        for table in $nocodb_tables; do
+            docker exec n8n-postgres psql -U n8n n8n -c "DROP TABLE IF EXISTS \"$table\" CASCADE;" >/dev/null 2>&1 || true
+        done
+        ui_stop_spinner
+        ui_status "success" "NocoDB tables đã được xóa"
+    else
+        ui_stop_spinner
+        ui_status "info" "Không tìm thấy NocoDB tables"
+    fi
 }
 
 stop_and_remove_nocodb() {
@@ -687,7 +986,7 @@ remove_nocodb_from_compose() {
 }
 
 remove_nocodb_data() {
-    ui_start_spinner "Xóa dữ liệu NocoDB"
+    ui_start_spinner "Xóa NocoDB volumes"
     
     # Remove volume
     docker volume rm n8n_nocodb_data 2>/dev/null || true
@@ -697,7 +996,7 @@ remove_nocodb_data() {
     rm -f "$N8N_COMPOSE_DIR/.nocodb-admin-password" 2>/dev/null || true
     
     ui_stop_spinner
-    ui_status "success" "Dữ liệu đã được xóa"
+    ui_status "success" "Volumes đã được xóa"
 }
 
 clean_nocodb_config() {
@@ -709,6 +1008,8 @@ clean_nocodb_config() {
     # Remove from manager config
     config_set "nocodb.installed" "false"
     config_set "nocodb.admin_email" ""
+    config_set "nocodb.database_mode" ""
+    config_set "nocodb.database_name" ""
     
     ui_status "success" "Cấu hình đã được dọn dẹp"
 }
@@ -717,6 +1018,10 @@ clean_nocodb_config() {
 
 nocodb_maintenance() {
     ui_section "Bảo trì NocoDB"
+    
+    local database_mode=$(config_get "nocodb.database_mode" "shared")
+    echo "Database mode: $database_mode"
+    echo ""
     
     echo "1) 🔄 Restart NocoDB"
     echo "2) 🔄 Update NocoDB image"
@@ -785,6 +1090,10 @@ cleanup_nocodb_logs() {
 check_nocodb_resources() {
     ui_section "Tài nguyên NocoDB"
     
+    local database_mode=$(config_get "nocodb.database_mode" "shared")
+    echo "Database mode: $database_mode"
+    echo ""
+    
     if docker ps --format '{{.Names}}' | grep -q "^${NOCODB_CONTAINER}$"; then
         local container_id=$(docker ps -q --filter "name=^${NOCODB_CONTAINER}$")
         
@@ -794,6 +1103,13 @@ check_nocodb_resources() {
         echo ""
         echo "💾 Volume Usage:"
         docker system df -v | grep nocodb || echo "Không có volumes NocoDB"
+        
+        if [[ "$database_mode" == "separate" ]]; then
+            echo ""
+            echo "🗄️  Database riêng cho NocoDB:"
+            local db_size=$(docker exec n8n-postgres psql -U nocodb -d nocodb -c "SELECT pg_size_pretty(pg_database_size('nocodb'));" -t 2>/dev/null | xargs)
+            echo "Size: ${db_size:-Unknown}"
+        fi
     else
         ui_status "error" "NocoDB container không chạy"
     fi
@@ -849,4 +1165,4 @@ show_nocodb_logs() {
     0) return ;;
     *) ui_status "error" "Lựa chọn không hợp lệ" ;;
     esac
-}   
+}
