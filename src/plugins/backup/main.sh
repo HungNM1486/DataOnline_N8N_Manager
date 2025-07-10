@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # DataOnline N8N Manager - Plugin Backup (FIXED)
-# Phiên bản: 1.0.1 - Fixed hostname resolution issues
+# Phiên bản: 1.0.2 - Auto-detect Google Drive remote name
 
 set -euo pipefail
 
@@ -18,6 +18,43 @@ PLUGIN_PROJECT_ROOT="$(dirname "$(dirname "$PLUGIN_DIR")")"
 readonly BACKUP_BASE_DIR="/opt/n8n/backups"
 readonly RCLONE_CONFIG="$HOME/.config/rclone/rclone.conf"
 readonly CRON_JOB_NAME="n8n-backup"
+
+# ===== HELPER FUNCTIONS FOR REMOTE DETECTION =====
+
+# Get Google Drive remote name
+get_gdrive_remote_name() {
+    if [[ ! -f "$RCLONE_CONFIG" ]]; then
+        return 1
+    fi
+    
+    # Find Google Drive remote (type = drive)
+    local remote_name=$(rclone listremotes | grep -E "^.*:$" | while read -r line; do
+        local name="${line%:}"
+        local type=$(rclone config show "$name" | grep "type = " | cut -d' ' -f3)
+        if [[ "$type" == "drive" ]]; then
+            echo "$name"
+            break
+        fi
+    done)
+    
+    if [[ -n "$remote_name" ]]; then
+        echo "$remote_name"
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Save remote name to config
+save_gdrive_remote_name() {
+    local remote_name="$1"
+    config_set "backup.gdrive_remote" "$remote_name"
+}
+
+# Get saved remote name from config
+get_saved_gdrive_remote_name() {
+    config_get "backup.gdrive_remote" ""
+}
 
 # ===== BACKUP FUNCTIONS =====
 
@@ -112,17 +149,23 @@ EOF
     echo "$BACKUP_BASE_DIR/${backup_name}.tar.gz"
 }
 
-# Upload backup lên Google Drive
+# Upload backup lên Google Drive (FIXED - Auto-detect remote name)
 upload_to_gdrive() {
     local backup_file="$1"
-    local remote_name="${2:-gdrive}"
-
+    
     if [[ ! -f "$RCLONE_CONFIG" ]]; then
         log_error "❌ Chưa cấu hình Google Drive"
         return 1
     fi
 
-    log_info "☁️ Đang upload lên Google Drive..."
+    # Auto-detect remote name
+    local remote_name
+    if ! remote_name=$(get_gdrive_remote_name); then
+        log_error "❌ Không tìm thấy Google Drive remote"
+        return 1
+    fi
+
+    log_info "☁️ Đang upload lên Google Drive (remote: $remote_name)..."
 
     if rclone copy "$backup_file" "${remote_name}:n8n-backups/" --progress; then
         log_success "✅ Upload thành công"
@@ -133,7 +176,7 @@ upload_to_gdrive() {
     fi
 }
 
-# Cleanup backup cũ
+# Cleanup backup cũ (FIXED - Auto-detect remote name)
 cleanup_old_backups() {
     local retention_days=$(config_get "backup.retention_days" "30")
 
@@ -144,7 +187,11 @@ cleanup_old_backups() {
 
     # Google Drive cleanup (if configured)
     if [[ -f "$RCLONE_CONFIG" ]]; then
-        rclone delete "gdrive:n8n-backups" --min-age "${retention_days}d" --include "n8n_backup_*.tar.gz" 2>/dev/null || true
+        local remote_name
+        if remote_name=$(get_gdrive_remote_name); then
+            rclone delete "${remote_name}:n8n-backups" --min-age "${retention_days}d" --include "n8n_backup_*.tar.gz" 2>/dev/null || true
+            log_info "🧹 Đã dọn dẹp Google Drive (remote: $remote_name)"
+        fi
     fi
 }
 
@@ -277,7 +324,7 @@ EOF
     return 0
 }
 
-# ===== GOOGLE DRIVE SETUP =====
+# ===== GOOGLE DRIVE SETUP (FIXED - Auto-detect remote name) =====
 
 # Cấu hình Google Drive
 setup_google_drive() {
@@ -291,29 +338,56 @@ setup_google_drive() {
     fi
 
     # Kiểm tra cấu hình hiện tại
-    if [[ -f "$RCLONE_CONFIG" ]] && rclone listremotes | grep -q "gdrive:"; then
-        log_info "✅ Google Drive đã được cấu hình"
+    local existing_remote=""
+    if [[ -f "$RCLONE_CONFIG" ]]; then
+        existing_remote=$(get_gdrive_remote_name || echo "")
+    fi
+
+    if [[ -n "$existing_remote" ]]; then
+        log_info "✅ Google Drive đã được cấu hình (remote: $existing_remote)"
         read -p "Bạn muốn cấu hình lại? [y/N]: " reconfigure
-        [[ ! "$reconfigure" =~ ^[Yy]$ ]] && return 0
+        if [[ ! "$reconfigure" =~ ^[Yy]$ ]]; then
+            # Save existing remote name
+            save_gdrive_remote_name "$existing_remote"
+            return 0
+        fi
     fi
 
     log_info "🔧 Bắt đầu cấu hình Google Drive với rclone..."
     echo "💡 Rclone sẽ hướng dẫn bạn từng bước để kết nối Google Drive"
+    echo "💡 Bạn có thể đặt tên remote bất kỳ (VD: gdrive, n8n, backup, ...)"
     echo ""
 
     # Chạy rclone config
     rclone config
 
+    # Auto-detect remote name after configuration
+    log_info "🔍 Đang tự động nhận diện remote Google Drive..."
+    
+    local remote_name
+    if remote_name=$(get_gdrive_remote_name); then
+        log_success "✅ Đã nhận diện remote: $remote_name"
+        save_gdrive_remote_name "$remote_name"
+    else
+        log_error "❌ Không tìm thấy remote Google Drive"
+        return 1
+    fi
+
     # Test connection
-    log_info "🧪 Kiểm tra kết nối..."
-    if rclone lsd gdrive: >/dev/null 2>&1; then
+    log_info "🧪 Kiểm tra kết nối với remote '$remote_name'..."
+    if rclone lsd "${remote_name}:" >/dev/null 2>&1; then
         log_success "✅ Kết nối Google Drive thành công!"
 
         # Tạo thư mục backup
-        rclone mkdir gdrive:n8n-backups
-        log_success "✅ Đã tạo thư mục n8n-backups trên Google Drive"
+        log_info "📁 Tạo thư mục n8n-backups..."
+        if rclone mkdir "${remote_name}:n8n-backups" 2>/dev/null || rclone lsd "${remote_name}:n8n-backups" >/dev/null 2>&1; then
+            log_success "✅ Thư mục n8n-backups đã sẵn sàng trên Google Drive"
+        else
+            log_error "❌ Không thể tạo thư mục backup"
+            return 1
+        fi
     else
-        log_error "❌ Không thể kết nối Google Drive"
+        log_error "❌ Không thể kết nối Google Drive với remote '$remote_name'"
         return 1
     fi
 }
@@ -326,6 +400,16 @@ backup_menu_main() {
         echo ""
         log_info "💾 QUẢN LÝ BACKUP N8N"
         echo ""
+        
+        # Show current Google Drive status
+        local remote_name=$(get_saved_gdrive_remote_name)
+        if [[ -n "$remote_name" ]] && [[ -f "$RCLONE_CONFIG" ]]; then
+            echo "☁️  Google Drive: Đã cấu hình (remote: $remote_name)"
+        else
+            echo "☁️  Google Drive: Chưa cấu hình"
+        fi
+        echo ""
+        
         echo "1) 🔄 Tạo backup ngay"
         echo "2) 📥 Restore từ backup"
         echo "3) ⏰ Cấu hình backup tự động"
@@ -363,9 +447,14 @@ backup_create_now() {
 
         # Hỏi upload Google Drive
         if [[ -f "$RCLONE_CONFIG" ]]; then
-            read -p "Upload lên Google Drive? [Y/n]: " upload
-            if [[ ! "$upload" =~ ^[Nn]$ ]]; then
-                upload_to_gdrive "$backup_file"
+            local remote_name=$(get_gdrive_remote_name || echo "")
+            if [[ -n "$remote_name" ]]; then
+                read -p "Upload lên Google Drive (remote: $remote_name)? [Y/n]: " upload
+                if [[ ! "$upload" =~ ^[Nn]$ ]]; then
+                    upload_to_gdrive "$backup_file"
+                fi
+            else
+                log_warn "Google Drive chưa được cấu hình đúng"
             fi
         fi
     else
@@ -453,7 +542,7 @@ backup_schedule_menu() {
     fi
 }
 
-# Liệt kê backup
+# Liệt kê backup (FIXED - Auto-detect remote name)
 backup_list() {
     log_info "📋 DANH SÁCH BACKUP"
     echo ""
@@ -466,8 +555,14 @@ backup_list() {
     echo ""
 
     if [[ -f "$RCLONE_CONFIG" ]]; then
-        echo "=== Backup Google Drive ==="
-        rclone ls gdrive:n8n-backups/ 2>/dev/null || echo "Không thể truy cập Google Drive"
+        local remote_name=$(get_gdrive_remote_name || echo "")
+        if [[ -n "$remote_name" ]]; then
+            echo "=== Backup Google Drive (remote: $remote_name) ==="
+            rclone ls "${remote_name}:n8n-backups/" 2>/dev/null || echo "Không thể truy cập Google Drive hoặc chưa có backup"
+        else
+            echo "=== Google Drive ==="
+            echo "Chưa cấu hình hoặc không tìm thấy remote"
+        fi
     fi
 }
 
