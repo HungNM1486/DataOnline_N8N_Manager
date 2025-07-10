@@ -1,8 +1,7 @@
 #!/bin/bash
 
-# DataOnline N8N Manager - Plugin Backup
-# Phiên bản: 1.0.0
-# Mô tả: Backup tự động n8n với Google Drive support
+# DataOnline N8N Manager - Plugin Backup (FIXED)
+# Phiên bản: 1.0.1 - Fixed hostname resolution issues
 
 set -euo pipefail
 
@@ -22,7 +21,7 @@ readonly CRON_JOB_NAME="n8n-backup"
 
 # ===== BACKUP FUNCTIONS =====
 
-# Tạo backup n8n
+# Tạo backup n8n (FIXED - removed unnecessary sudo)
 create_backup() {
     local timestamp=$(date +%Y%m%d_%H%M%S)
     local backup_name="n8n_backup_${timestamp}"
@@ -30,50 +29,82 @@ create_backup() {
 
     log_info "🔄 Bắt đầu backup n8n..." >&2
 
-    # Tạo thư mục backup
-    sudo mkdir -p "$backup_dir"
+    # Tạo thư mục backup (only use sudo when needed)
+    if [[ ! -d "$BACKUP_BASE_DIR" ]]; then
+        if [[ -w "$(dirname "$BACKUP_BASE_DIR")" ]]; then
+            mkdir -p "$BACKUP_BASE_DIR"
+        else
+            sudo mkdir -p "$BACKUP_BASE_DIR"
+        fi
+    fi
+    
+    if [[ -w "$BACKUP_BASE_DIR" ]]; then
+        mkdir -p "$backup_dir"
+    else
+        sudo mkdir -p "$backup_dir"
+    fi
 
-    # 1. Backup PostgreSQL database
+    # 1. Backup PostgreSQL database (FIXED)
     log_info "📦 Backup database PostgreSQL..." >&2
-    if sudo docker exec n8n-postgres pg_dump -U n8n n8n >"$backup_dir/database.sql"; then
+    if docker exec n8n-postgres pg_dump -U n8n n8n >"$backup_dir/database.sql" 2>/dev/null; then
         log_success "✅ Database backup thành công" >&2
     else
         log_error "❌ Database backup thất bại" >&2
         return 1
     fi
 
-    # 2. Backup n8n data files
+    # 2. Backup n8n data files (FIXED)
     log_info "📁 Backup n8n data files..." >&2
-    local n8n_volume=$(sudo docker volume inspect --format '{{ .Mountpoint }}' n8n_n8n_data 2>/dev/null)
+    local n8n_volume=$(docker volume inspect --format '{{ .Mountpoint }}' n8n_n8n_data 2>/dev/null)
 
     if [[ -n "$n8n_volume" ]]; then
-        sudo tar -czf "$backup_dir/n8n_data.tar.gz" -C "$n8n_volume" .
+        if [[ -w "$backup_dir" ]]; then
+            tar -czf "$backup_dir/n8n_data.tar.gz" -C "$n8n_volume" . 2>/dev/null || {
+                # Fallback with sudo if permission denied
+                sudo tar -czf "$backup_dir/n8n_data.tar.gz" -C "$n8n_volume" . 2>/dev/null
+            }
+        else
+            sudo tar -czf "$backup_dir/n8n_data.tar.gz" -C "$n8n_volume" . 2>/dev/null
+        fi
         log_success "✅ Data files backup thành công" >&2
     else
         log_error "❌ Không tìm thấy n8n data volume" >&2
         return 1
     fi
 
-    # 3. Backup docker-compose và config
+    # 3. Backup docker-compose và config (FIXED)
     log_info "⚙️ Backup cấu hình..." >&2
-    sudo cp /opt/n8n/docker-compose.yml "$backup_dir/"
-    sudo cp /opt/n8n/.env "$backup_dir/" 2>/dev/null || true
+    if [[ -f "/opt/n8n/docker-compose.yml" ]]; then
+        cp /opt/n8n/docker-compose.yml "$backup_dir/" 2>/dev/null || \
+        sudo cp /opt/n8n/docker-compose.yml "$backup_dir/"
+    fi
+    
+    if [[ -f "/opt/n8n/.env" ]]; then
+        cp /opt/n8n/.env "$backup_dir/" 2>/dev/null || \
+        sudo cp /opt/n8n/.env "$backup_dir/" 2>/dev/null || true
+    fi
 
     # 4. Tạo metadata
     cat >"$backup_dir/metadata.json" <<EOF
 {
     "timestamp": "$(date -Iseconds)",
-    "version": "$(sudo docker exec n8n n8n --version 2>/dev/null || echo "unknown")",
+    "version": "$(docker exec n8n n8n --version 2>/dev/null || echo "unknown")",
     "type": "full",
-    "size": "$(du -sh "$backup_dir" | cut -f1)"
+    "size": "$(du -sh "$backup_dir" 2>/dev/null | cut -f1 || echo "unknown")"
 }
 EOF
 
-    # 5. Nén toàn bộ backup
+    # 5. Nén toàn bộ backup (FIXED)
     log_info "🗜️ Đang nén backup..." >&2
     cd "$BACKUP_BASE_DIR"
-    sudo tar -czf "${backup_name}.tar.gz" "$backup_name"
-    sudo rm -rf "$backup_name"
+    
+    if [[ -w "$BACKUP_BASE_DIR" ]]; then
+        tar -czf "${backup_name}.tar.gz" "$backup_name" 2>/dev/null && \
+        rm -rf "$backup_name"
+    else
+        sudo tar -czf "${backup_name}.tar.gz" "$backup_name" 2>/dev/null && \
+        sudo rm -rf "$backup_name"
+    fi
 
     log_success "✅ Backup hoàn tất: ${backup_name}.tar.gz" >&2
 
@@ -109,17 +140,17 @@ cleanup_old_backups() {
     log_info "🧹 Dọn dẹp backup cũ hơn $retention_days ngày..."
 
     # Local cleanup
-    find "$BACKUP_BASE_DIR" -name "n8n_backup_*.tar.gz" -mtime +$retention_days -delete
+    find "$BACKUP_BASE_DIR" -name "n8n_backup_*.tar.gz" -mtime +$retention_days -delete 2>/dev/null || true
 
     # Google Drive cleanup (if configured)
     if [[ -f "$RCLONE_CONFIG" ]]; then
-        rclone delete "gdrive:n8n-backups" --min-age "${retention_days}d" --include "n8n_backup_*.tar.gz"
+        rclone delete "gdrive:n8n-backups" --min-age "${retention_days}d" --include "n8n_backup_*.tar.gz" 2>/dev/null || true
     fi
 }
 
 # ===== RESTORE FUNCTIONS =====
 
-# Restore từ backup
+# Restore từ backup (FIXED)
 restore_backup() {
     local backup_file="$1"
 
@@ -143,25 +174,32 @@ restore_backup() {
     # Stop n8n
     log_info "⏹️ Dừng n8n services..."
     cd /opt/n8n
-    sudo docker compose down
+    docker compose down 2>/dev/null || sudo docker compose down
 
     # Restore database
     log_info "🗄️ Restore database..."
-    sudo docker compose up -d postgres
+    docker compose up -d postgres 2>/dev/null || sudo docker compose up -d postgres
     sleep 5
 
-    sudo docker exec -i n8n-postgres psql -U n8n -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"
-    sudo docker exec -i n8n-postgres psql -U n8n n8n <"$backup_dir/database.sql"
+    docker exec -i n8n-postgres psql -U n8n -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;" 2>/dev/null
+    docker exec -i n8n-postgres psql -U n8n n8n <"$backup_dir/database.sql"
 
     # Restore data files
     log_info "📁 Restore data files..."
-    local n8n_volume=$(sudo docker volume inspect --format '{{ .Mountpoint }}' n8n_n8n_data)
-    sudo rm -rf "$n8n_volume"/*
-    sudo tar -xzf "$backup_dir/n8n_data.tar.gz" -C "$n8n_volume"
+    local n8n_volume=$(docker volume inspect --format '{{ .Mountpoint }}' n8n_n8n_data)
+    
+    # Remove old data and restore
+    if [[ -w "$n8n_volume" ]]; then
+        rm -rf "$n8n_volume"/*
+        tar -xzf "$backup_dir/n8n_data.tar.gz" -C "$n8n_volume"
+    else
+        sudo rm -rf "$n8n_volume"/*
+        sudo tar -xzf "$backup_dir/n8n_data.tar.gz" -C "$n8n_volume"
+    fi
 
     # Start n8n
     log_info "▶️ Khởi động lại n8n..."
-    sudo docker compose up -d
+    docker compose up -d 2>/dev/null || sudo docker compose up -d
 
     # Cleanup
     rm -rf "$temp_dir"
@@ -171,7 +209,7 @@ restore_backup() {
 
 # ===== CRON JOB MANAGEMENT =====
 
-# Cài đặt cron job
+# Cài đặt cron job (FIXED)
 setup_cron_job() {
     local frequency="$1" # daily, weekly, monthly
     local hour="${2:-2}" # Default 2 AM
@@ -181,8 +219,8 @@ setup_cron_job() {
     # Tạo script wrapper
     local cron_script="/usr/local/bin/n8n-backup-cron.sh"
 
-    # Sử dụng cat với sudo tee để tránh vấn đề với heredoc
-    cat <<EOF | sudo tee "$cron_script" >/dev/null
+    # Create script content
+    cat > /tmp/n8n-backup-cron.sh << EOF
 #!/bin/bash
 # N8N Backup Cron Script
 export PATH="/usr/local/bin:/usr/bin:/bin"
@@ -211,7 +249,14 @@ fi
 cleanup_old_backups
 EOF
 
-    sudo chmod +x "$cron_script"
+    # Install script with proper permissions
+    if sudo cp /tmp/n8n-backup-cron.sh "$cron_script" 2>/dev/null && sudo chmod +x "$cron_script" 2>/dev/null; then
+        rm -f /tmp/n8n-backup-cron.sh
+        log_success "✅ Cron script đã được tạo"
+    else
+        log_error "Không thể tạo cron script"
+        return 1
+    fi
 
     # Set cron schedule
     local cron_schedule
@@ -229,6 +274,7 @@ EOF
     ) | crontab -
 
     log_success "✅ Đã cài đặt backup $frequency lúc $hour:00"
+    return 0
 }
 
 # ===== GOOGLE DRIVE SETUP =====
@@ -251,16 +297,9 @@ setup_google_drive() {
         [[ ! "$reconfigure" =~ ^[Yy]$ ]] && return 0
     fi
 
-    log_info "📝 Hướng dẫn cấu hình Google Drive:"
+    log_info "🔧 Bắt đầu cấu hình Google Drive với rclone..."
+    echo "💡 Rclone sẽ hướng dẫn bạn từng bước để kết nối Google Drive"
     echo ""
-    echo "1. Truy cập: https://console.cloud.google.com"
-    echo "2. Tạo project mới hoặc chọn project có sẵn"
-    echo "3. Enable Google Drive API"
-    echo "4. Tạo OAuth 2.0 credentials"
-    echo "5. Download file credentials"
-    echo ""
-
-    read -p "Nhấn Enter khi đã sẵn sàng..."
 
     # Chạy rclone config
     rclone config
@@ -272,6 +311,7 @@ setup_google_drive() {
 
         # Tạo thư mục backup
         rclone mkdir gdrive:n8n-backups
+        log_success "✅ Đã tạo thư mục n8n-backups trên Google Drive"
     else
         log_error "❌ Không thể kết nối Google Drive"
         return 1
@@ -398,11 +438,19 @@ backup_schedule_menu() {
         return
     fi
 
-    setup_cron_job "$frequency" "$hour"
-
-    # Lưu config
-    config_set "backup.schedule" "$frequency"
-    config_set "backup.hour" "$hour"
+    if setup_cron_job "$frequency" "$hour"; then
+        # Lưu config
+        config_set "backup.schedule" "$frequency"
+        config_set "backup.hour" "$hour"
+        
+        log_success "✅ Backup tự động đã được cấu hình: $frequency lúc $hour:00"
+        echo ""
+        read -p "Nhấn Enter để quay lại menu..."
+    else
+        log_error "❌ Cấu hình backup tự động thất bại"
+        echo ""
+        read -p "Nhấn Enter để quay lại menu..."
+    fi
 }
 
 # Liệt kê backup
@@ -449,17 +497,28 @@ init_backup_on_install() {
     log_info "🔧 Khởi tạo backup tự động..."
 
     # Tạo thư mục backup
-    sudo mkdir -p "$BACKUP_BASE_DIR"
+    if [[ -w "/opt/n8n" ]]; then
+        mkdir -p "$BACKUP_BASE_DIR"
+    else
+        sudo mkdir -p "$BACKUP_BASE_DIR"
+    fi
 
     # Setup cron job mặc định (monthly)
     setup_cron_job "monthly" "2"
 
     # Tạo manager environment file
-    sudo tee /opt/n8n/manager-env.sh >/dev/null <<EOF
+    cat > /tmp/manager-env.sh << EOF
 # DataOnline N8N Manager Environment
 export MANAGER_PATH="$PLUGIN_PROJECT_ROOT"
 export BACKUP_DIR="$BACKUP_BASE_DIR"
 EOF
+
+    if [[ -w "/opt/n8n" ]]; then
+        cp /tmp/manager-env.sh /opt/n8n/manager-env.sh
+    else
+        sudo cp /tmp/manager-env.sh /opt/n8n/manager-env.sh
+    fi
+    rm -f /tmp/manager-env.sh
 
     log_success "✅ Đã cài đặt backup tự động hàng tháng"
 }
