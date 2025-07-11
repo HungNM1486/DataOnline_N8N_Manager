@@ -58,13 +58,13 @@ get_saved_gdrive_remote_name() {
 
 # ===== BACKUP FUNCTIONS =====
 
-# Tạo backup n8n (FIXED - removed unnecessary sudo)
+# Tạo backup toàn diện N8N + NocoDB
 create_backup() {
     local timestamp=$(date +%Y%m%d_%H%M%S)
     local backup_name="n8n_backup_${timestamp}"
     local backup_dir="$BACKUP_BASE_DIR/$backup_name"
 
-    log_info "🔄 Bắt đầu backup n8n..." >&2
+    log_info "🔄 Bắt đầu backup toàn diện N8N + NocoDB..." >&2
 
     # Tạo thư mục backup (only use sudo when needed)
     if [[ ! -d "$BACKUP_BASE_DIR" ]]; then
@@ -81,17 +81,17 @@ create_backup() {
         sudo mkdir -p "$backup_dir"
     fi
 
-    # 1. Backup PostgreSQL database (FIXED)
-    log_info "📦 Backup database PostgreSQL..." >&2
-    if docker exec n8n-postgres pg_dump -U n8n n8n >"$backup_dir/database.sql" 2>/dev/null; then
-        log_success "✅ Database backup thành công" >&2
+    # 1. Backup PostgreSQL N8N database
+    log_info "📦 Backup N8N database PostgreSQL..." >&2
+    if docker exec n8n-postgres pg_dump -U n8n n8n >"$backup_dir/n8n_database.sql" 2>/dev/null; then
+        log_success "✅ N8N database backup thành công" >&2
     else
-        log_error "❌ Database backup thất bại" >&2
+        log_error "❌ N8N database backup thất bại" >&2
         return 1
     fi
 
-    # 2. Backup n8n data files (FIXED)
-    log_info "📁 Backup n8n data files..." >&2
+    # 2. Backup N8N data files
+    log_info "📁 Backup N8N data files..." >&2
     local n8n_volume=$(docker volume inspect --format '{{ .Mountpoint }}' n8n_n8n_data 2>/dev/null)
 
     if [[ -n "$n8n_volume" ]]; then
@@ -103,36 +103,132 @@ create_backup() {
         else
             sudo tar -czf "$backup_dir/n8n_data.tar.gz" -C "$n8n_volume" . 2>/dev/null
         fi
-        log_success "✅ Data files backup thành công" >&2
+        log_success "✅ N8N data files backup thành công" >&2
     else
-        log_error "❌ Không tìm thấy n8n data volume" >&2
+        log_error "❌ Không tìm thấy N8N data volume" >&2
         return 1
     fi
 
-    # 3. Backup docker-compose và config (FIXED)
-    log_info "⚙️ Backup cấu hình..." >&2
+    # 3. Backup NocoDB (nếu có cài đặt)
+    local nocodb_installed=false
+    if docker ps --format '{{.Names}}' | grep -q "^n8n-nocodb$" || [[ -f "/opt/n8n/.nocodb-admin-password" ]]; then
+        nocodb_installed=true
+        log_info "🗄️  Backup NocoDB..." >&2
+        
+        # 3a. Backup NocoDB database (nếu separate mode)
+        local nocodb_db_mode=$(grep "NOCODB_DATABASE_MODE=" "/opt/n8n/.env" 2>/dev/null | cut -d'=' -f2 || echo "shared")
+        if [[ "$nocodb_db_mode" == "separate" ]]; then
+            log_info "📦 Backup NocoDB database riêng..." >&2
+            if docker exec n8n-postgres pg_dump -U nocodb nocodb >"$backup_dir/nocodb_database.sql" 2>/dev/null; then
+                log_success "✅ NocoDB database backup thành công" >&2
+            else
+                log_warning "⚠️  NocoDB database backup thất bại (có thể chưa tạo)" >&2
+            fi
+        else
+            log_info "📝 NocoDB dùng chung database N8N (đã backup)" >&2
+        fi
+        
+        # 3b. Backup NocoDB data volume
+        log_info "📁 Backup NocoDB data volume..." >&2
+        local nocodb_volume=$(docker volume inspect --format '{{ .Mountpoint }}' n8n_nocodb_data 2>/dev/null)
+        if [[ -n "$nocodb_volume" ]]; then
+            if [[ -w "$backup_dir" ]]; then
+                tar -czf "$backup_dir/nocodb_data.tar.gz" -C "$nocodb_volume" . 2>/dev/null || {
+                    sudo tar -czf "$backup_dir/nocodb_data.tar.gz" -C "$nocodb_volume" . 2>/dev/null
+                }
+            else
+                sudo tar -czf "$backup_dir/nocodb_data.tar.gz" -C "$nocodb_volume" . 2>/dev/null
+            fi
+            log_success "✅ NocoDB data volume backup thành công" >&2
+        else
+            log_warning "⚠️  Không tìm thấy NocoDB data volume" >&2
+        fi
+        
+        # 3c. Backup NocoDB admin password
+        if [[ -f "/opt/n8n/.nocodb-admin-password" ]]; then
+            cp "/opt/n8n/.nocodb-admin-password" "$backup_dir/" 2>/dev/null || \
+            sudo cp "/opt/n8n/.nocodb-admin-password" "$backup_dir/" 2>/dev/null || true
+            log_success "✅ NocoDB admin password backup thành công" >&2
+        fi
+        
+        # 3d. Backup NocoDB config directory
+        if [[ -d "/opt/n8n/nocodb-config" ]]; then
+            if [[ -w "$backup_dir" ]]; then
+                tar -czf "$backup_dir/nocodb_config.tar.gz" -C "/opt/n8n" nocodb-config 2>/dev/null || {
+                    sudo tar -czf "$backup_dir/nocodb_config.tar.gz" -C "/opt/n8n" nocodb-config 2>/dev/null
+                }
+            else
+                sudo tar -czf "$backup_dir/nocodb_config.tar.gz" -C "/opt/n8n" nocodb-config 2>/dev/null
+            fi
+            log_success "✅ NocoDB config directory backup thành công" >&2
+        fi
+        
+        # 3e. Backup Nginx SSL config cho NocoDB subdomain (nếu có)
+        local nocodb_domain=$(grep "nocodb.domain" "$HOME/.config/datalonline-n8n/settings.conf" 2>/dev/null | cut -d'=' -f2 | tr -d '"' || echo "")
+        if [[ -n "$nocodb_domain" ]] && [[ -f "/etc/nginx/sites-available/${nocodb_domain}.conf" ]]; then
+            mkdir -p "$backup_dir/nginx-configs"
+            sudo cp "/etc/nginx/sites-available/${nocodb_domain}.conf" "$backup_dir/nginx-configs/" 2>/dev/null || true
+            log_success "✅ NocoDB Nginx SSL config backup thành công" >&2
+        fi
+    else
+        log_info "ℹ️  NocoDB chưa được cài đặt, bỏ qua backup NocoDB" >&2
+    fi
+
+    # 4. Backup docker-compose và config chung
+    log_info "⚙️ Backup cấu hình chung..." >&2
     if [[ -f "/opt/n8n/docker-compose.yml" ]]; then
         cp /opt/n8n/docker-compose.yml "$backup_dir/" 2>/dev/null || \
         sudo cp /opt/n8n/docker-compose.yml "$backup_dir/"
+        log_success "✅ docker-compose.yml backup thành công" >&2
     fi
     
     if [[ -f "/opt/n8n/.env" ]]; then
         cp /opt/n8n/.env "$backup_dir/" 2>/dev/null || \
         sudo cp /opt/n8n/.env "$backup_dir/" 2>/dev/null || true
+        log_success "✅ .env file backup thành công" >&2
+    fi
+    
+    # Backup manager config
+    if [[ -f "$HOME/.config/datalonline-n8n/settings.conf" ]]; then
+        mkdir -p "$backup_dir/manager-config"
+        cp "$HOME/.config/datalonline-n8n/settings.conf" "$backup_dir/manager-config/" 2>/dev/null || true
+        log_success "✅ Manager config backup thành công" >&2
     fi
 
-    # 4. Tạo metadata
+    # 5. Tạo comprehensive metadata
+    local n8n_version=$(docker exec n8n n8n --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo "unknown")
+    local nocodb_version=$(docker inspect n8n-nocodb --format '{{.Config.Image}}' 2>/dev/null | cut -d':' -f2 || echo "not_installed")
+    
     cat >"$backup_dir/metadata.json" <<EOF
 {
     "timestamp": "$(date -Iseconds)",
-    "version": "$(docker exec n8n n8n --version 2>/dev/null || echo "unknown")",
-    "type": "full",
-    "size": "$(du -sh "$backup_dir" 2>/dev/null | cut -f1 || echo "unknown")"
+    "backup_type": "comprehensive",
+    "components": {
+        "n8n": {
+            "version": "$n8n_version",
+            "database": "included",
+            "data_volume": "included",
+            "config": "included"
+        },
+        "nocodb": {
+            "installed": $nocodb_installed,
+            "version": "$nocodb_version",
+            "database_mode": "$(echo $nocodb_db_mode)",
+            "database": "$([ "$nocodb_db_mode" == "separate" ] && echo "included" || echo "shared_with_n8n")",
+            "data_volume": "$([ "$nocodb_installed" == "true" ] && echo "included" || echo "not_applicable")",
+            "admin_password": "$([ -f "/opt/n8n/.nocodb-admin-password" ] && echo "included" || echo "not_found")",
+            "ssl_config": "$([ -n "$nocodb_domain" ] && echo "included" || echo "not_configured")"
+        }
+    },
+    "manager_config": "included",
+    "docker_compose": "included",
+    "environment": "included",
+    "backup_size": "$(du -sh "$backup_dir" 2>/dev/null | cut -f1 || echo "calculating...")"
 }
 EOF
 
-    # 5. Nén toàn bộ backup (FIXED)
-    log_info "🗜️ Đang nén backup..." >&2
+    # 6. Nén toàn bộ backup
+    log_info "🗜️ Đang nén comprehensive backup..." >&2
     cd "$BACKUP_BASE_DIR"
     
     if [[ -w "$BACKUP_BASE_DIR" ]]; then
@@ -143,7 +239,15 @@ EOF
         sudo rm -rf "$backup_name"
     fi
 
-    log_success "✅ Backup hoàn tất: ${backup_name}.tar.gz" >&2
+    # 7. Tạo backup summary
+    local final_size=$(du -sh "${BACKUP_BASE_DIR}/${backup_name}.tar.gz" 2>/dev/null | cut -f1 || echo "unknown")
+    log_success "✅ Comprehensive backup hoàn tất: ${backup_name}.tar.gz ($final_size)" >&2
+    
+    if [[ "$nocodb_installed" == "true" ]]; then
+        log_info "📋 Backup bao gồm: N8N + NocoDB + SSL configs + Manager settings" >&2
+    else
+        log_info "📋 Backup bao gồm: N8N + Manager settings" >&2
+    fi
 
     # Chỉ echo đường dẫn file, không có log messages
     echo "$BACKUP_BASE_DIR/${backup_name}.tar.gz"

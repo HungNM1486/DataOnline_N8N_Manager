@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # DataOnline N8N Manager - Database Manager Plugin  
-# Phiên bản: 1.0.0
+# Phiên bản: 1.0.3 - Simplified Menu (8 core functions)
 # Mô tả: NocoDB integration cho quản lý database N8N
 
 set -euo pipefail
@@ -19,7 +19,6 @@ PLUGIN_PROJECT_ROOT="$(dirname "$(dirname "$PLUGIN_DIR")")"
 
 # Load sub-modules
 source "$PLUGIN_DIR/nocodb-setup.sh"
-source "$PLUGIN_DIR/nocodb-config.sh"
 source "$PLUGIN_DIR/nocodb-management.sh"
 
 # Constants
@@ -36,20 +35,18 @@ database_manager_main() {
     while true; do
         show_database_manager_menu
         
-        echo -n -e "${UI_WHITE}Chọn [0-9]: ${UI_NC}"
+        echo -n -e "${UI_WHITE}Chọn [0-8]: ${UI_NC}"
         read -r choice
 
         case "$choice" in
         1) check_nocodb_status ;;
         2) install_nocodb ;;
-        3) configure_nocodb_views ;;
-        4) open_nocodb_interface ;;
-        5) manage_nocodb_users ;;
-        6) backup_nocodb_config ;;
-        7) nocodb_maintenance ;;
-        8) show_nocodb_logs ;;
-        9) uninstall_nocodb ;;
-        10) setup_nocodb_ssl ;; 
+        3) open_nocodb_interface ;;
+        4) backup_nocodb_config ;;
+        5) nocodb_maintenance ;;
+        6) show_nocodb_logs ;;
+        7) setup_nocodb_ssl ;; 
+        8) uninstall_nocodb ;;
         0) return 0 ;;
         *) ui_status "error" "Lựa chọn không hợp lệ" ;;
         esac
@@ -75,16 +72,14 @@ show_database_manager_menu() {
     
     echo "🗄️  QUẢN LÝ DATABASE N8N"
     echo ""
-    echo "1) 📊 Kiểm tra trạng thái NocoDB"
+    echo "1) 📊 Kiểm tra trạng thái"
     echo "2) 🚀 Cài đặt NocoDB"
-    echo "3) ⚙️  Cấu hình Views & Dashboard"
-    echo "4) 🌐 Mở giao diện NocoDB"
-    echo "5) 👥 Quản lý người dùng"
-    echo "6) 💾 Backup cấu hình"
-    echo "7) 🔧 Bảo trì & tối ưu"
-    echo "8) 📝 Xem logs"
-    echo "9) 🗑️  Gỡ cài đặt NocoDB"
-    echo "10) 🔒 Cài đặt SSL cho NocoDB"
+    echo "3) 🌐 Mở giao diện NocoDB"
+    echo "4) 💾 Backup cấu hình"
+    echo "5) 🔧 Bảo trì & tối ưu"
+    echo "6) 📝 Xem logs"
+    echo "7) 🔒 Cài đặt SSL"
+    echo "8) 🗑️  Gỡ cài đặt NocoDB"
     echo "0) ⬅️  Quay lại"
     echo ""
 }
@@ -104,12 +99,17 @@ get_nocodb_status() {
 }
 
 get_nocodb_url() {
-    local domain=$(config_get "n8n.domain" "")
+    local domain=$(config_get "nocodb.domain" "")
     if [[ -n "$domain" ]]; then
-        echo "https://db.$domain"
+        echo "https://$domain"
     else
-        local public_ip=$(get_public_ip || echo "localhost")
-        echo "http://$public_ip:$NOCODB_PORT"
+        local main_domain=$(config_get "n8n.domain" "")
+        if [[ -n "$main_domain" ]]; then
+            echo "https://db.$main_domain"
+        else
+            local public_ip=$(get_public_ip || echo "localhost")
+            echo "http://$public_ip:8080"
+        fi
     fi
 }
 
@@ -193,6 +193,17 @@ open_nocodb_interface() {
         "" \
         "💡 Tip: Bookmark URL này để truy cập nhanh"
     
+    # Show N8N database connection info
+    local n8n_postgres_password=$(grep "POSTGRES_PASSWORD=" "$N8N_COMPOSE_DIR/.env" | cut -d'=' -f2 2>/dev/null || echo "N/A")
+    ui_info_box "Kết nối N8N Database trong NocoDB" \
+        "Host: postgres (hoặc IP server)" \
+        "Port: 5432" \
+        "Database: n8n" \
+        "User: n8n" \
+        "Password: $n8n_postgres_password" \
+        "" \
+        "💡 Sử dụng thông tin này để kết nối N8N data trong NocoDB"
+    
     # Try to open in browser if possible
     if command_exists xdg-open; then
         echo -n -e "${UI_YELLOW}Mở trong browser? [Y/n]: ${UI_NC}"
@@ -246,9 +257,9 @@ install_nocodb() {
         ui_status "success" "🎉 NocoDB đã được cài đặt thành công!"
         
         ui_info_box "Bước tiếp theo" \
-            "1. Cấu hình Views & Dashboard (option 3)" \
-            "2. Truy cập giao diện (option 4)" \
-            "3. Tạo users cho team (option 5)"
+            "1. Truy cập giao diện (option 3)" \
+            "2. Tạo connection tới N8N database" \
+            "3. Tạo views và dashboards theo nhu cầu"
     else
         ui_status "error" "Cài đặt NocoDB thất bại"
         return 1
@@ -302,6 +313,167 @@ check_nocodb_prerequisites() {
     fi
     
     return $errors
+}
+
+# ===== SSL SETUP FUNCTION =====
+
+setup_nocodb_ssl() {
+    local main_domain=$(config_get "n8n.domain" "")
+    local subdomain="db.$main_domain"
+    
+    if [[ -z "$main_domain" ]]; then
+        echo -n -e "${UI_WHITE}Nhập domain chính (VD: n8n-store.xyz): ${UI_NC}"
+        read -r main_domain
+        config_set "n8n.domain" "$main_domain"
+        subdomain="db.$main_domain"
+    fi
+    
+    ui_info_box "SSL Setup cho NocoDB" \
+        "Domain: $subdomain" \
+        "Port: 8080 → 443" \
+        "Certificate: Let's Encrypt"
+    
+    if ! ui_confirm "Setup SSL cho $subdomain?"; then
+        return 0
+    fi
+    
+    # Check if SSL plugin exists
+    local ssl_plugin="$PLUGIN_PROJECT_ROOT/src/plugins/ssl/main.sh"
+    if [[ -f "$ssl_plugin" ]]; then
+        # Use existing SSL plugin logic
+        source "$ssl_plugin"
+        
+        # Create nginx config for subdomain
+        create_nocodb_nginx_config "$subdomain"
+        
+        # Get SSL certificate
+        obtain_nocodb_ssl_certificate "$subdomain"
+        
+        # Update NocoDB config
+        update_nocodb_ssl_config "$subdomain"
+    else
+        ui_status "error" "SSL plugin không tồn tại"
+        ui_info "Vui lòng sử dụng chức năng SSL chính trong menu chính"
+    fi
+}
+
+create_nocodb_nginx_config() {
+    local subdomain="$1"
+    local nginx_conf="/etc/nginx/sites-available/${subdomain}.conf"
+    
+    ui_start_spinner "Tạo Nginx config cho $subdomain"
+    
+    sudo tee "$nginx_conf" > /dev/null << EOF
+server {
+    listen 80;
+    server_name $subdomain;
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/html;
+        allow all;
+    }
+
+    location / {
+        return 301 https://\$host\$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl http2;
+    server_name $subdomain;
+
+    ssl_certificate /etc/letsencrypt/live/$subdomain/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/$subdomain/privkey.pem;
+    
+    include /etc/letsencrypt/options-ssl-nginx.conf;
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+
+    client_max_body_size 100M;
+    
+    access_log /var/log/nginx/$subdomain.access.log;
+    error_log /var/log/nginx/$subdomain.error.log;
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_cache_bypass \$http_upgrade;
+        
+        proxy_buffering off;
+        proxy_read_timeout 7200s;
+        proxy_send_timeout 7200s;
+    }
+}
+EOF
+
+    # Enable site
+    sudo ln -sf "$nginx_conf" /etc/nginx/sites-enabled/
+    
+    ui_stop_spinner
+    ui_status "success" "Nginx config tạo thành công"
+}
+
+obtain_nocodb_ssl_certificate() {
+    local subdomain="$1"
+    local email="admin@$(config_get "n8n.domain")"
+    
+    # Ensure webroot exists
+    sudo mkdir -p /var/www/html/.well-known/acme-challenge
+    sudo chown -R www-data:www-data /var/www/html
+    
+    # Test nginx config
+    if ! sudo nginx -t; then
+        ui_status "error" "Nginx config có lỗi"
+        return 1
+    fi
+    
+    # Reload nginx
+    sudo systemctl reload nginx
+    
+    ui_start_spinner "Lấy SSL certificate cho $subdomain"
+    
+    if sudo certbot certonly --webroot \
+        -w /var/www/html \
+        -d "$subdomain" \
+        --agree-tos \
+        --email "$email" \
+        --non-interactive; then
+        ui_stop_spinner
+        ui_status "success" "SSL certificate thành công"
+    else
+        ui_stop_spinner
+        ui_status "error" "SSL certificate thất bại"
+        return 1
+    fi
+    
+    # Reload nginx with SSL
+    sudo systemctl reload nginx
+}
+
+update_nocodb_ssl_config() {
+    local subdomain="$1"
+    
+    ui_start_spinner "Cập nhật NocoDB config"
+    
+    # Update .env
+    sed -i "s|NOCODB_PUBLIC_URL=.*|NOCODB_PUBLIC_URL=https://$subdomain|" "$N8N_COMPOSE_DIR/.env"
+    
+    # Save to manager config
+    config_set "nocodb.domain" "$subdomain"
+    config_set "nocodb.ssl_enabled" "true"
+    
+    # Restart NocoDB
+    cd "$N8N_COMPOSE_DIR"
+    docker compose restart nocodb
+    
+    ui_stop_spinner
+    ui_status "success" "NocoDB config cập nhật thành công"
 }
 
 # ===== UNINSTALL FUNCTION =====
