@@ -338,7 +338,8 @@ setup_nocodb_ssl() {
     fi
     
     # Check if SSL plugin exists
-    local ssl_plugin="$PLUGIN_PROJECT_ROOT/src/plugins/ssl/main.sh"
+    local ssl_plugin="$PLUGIN_PROJECT_ROOT/plugins/ssl/main.sh"
+    ui_status "info" "Đang kiểm tra SSL plugin tại: $ssl_plugin"
     if [[ -f "$ssl_plugin" ]]; then
         # Use existing SSL plugin logic
         source "$ssl_plugin"
@@ -352,8 +353,8 @@ setup_nocodb_ssl() {
         # Update NocoDB config
         update_nocodb_ssl_config "$subdomain"
     else
-        ui_status "error" "SSL plugin không tồn tại"
-        ui_info "Vui lòng sử dụng chức năng SSL chính trong menu chính"
+        ui_status "error" "SSL plugin không tồn tại tại đường dẫn: $ssl_plugin"
+        ui_status "info" "Vui lòng kiểm tra lại biến PLUGIN_PROJECT_ROOT hoặc đường dẫn src/plugins/ssl/main.sh."
     fi
 }
 

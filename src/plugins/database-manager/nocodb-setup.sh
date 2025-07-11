@@ -139,7 +139,33 @@ generate_nocodb_secrets() {
     
     local jwt_secret=$(generate_random_string 64)
     local admin_password=$(generate_random_string 16)
-    local admin_email="admin@$(config_get "n8n.domain" "localhost")"
+    
+    # Stop spinner to get user input
+    ui_stop_spinner
+    
+    # Get admin email from user with validation
+    ui_section "Cấu hình Admin NocoDB"
+    local admin_email=""
+    
+    while true; do
+        echo -n -e "${UI_WHITE}Nhập email admin cho NocoDB: ${UI_NC}"
+        read -r admin_email
+        
+        # Validate email format
+        if [[ -z "$admin_email" ]]; then
+            ui_status "error" "Email không được để trống"
+            continue
+        fi
+        
+        if [[ "$admin_email" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
+            ui_status "success" "Email hợp lệ: $admin_email"
+            break
+        else
+            ui_status "error" "Email không hợp lệ. Vui lòng nhập lại (VD: admin@company.com)"
+        fi
+    done
+    
+    ui_start_spinner "Lưu cấu hình"
     
     # Generate database password for separate mode
     if [[ "$NOCODB_DATABASE_MODE" == "separate" ]]; then
@@ -195,6 +221,11 @@ EOF
     
     ui_stop_spinner
     ui_status "success" "Secrets đã được tạo (mode: $NOCODB_DATABASE_MODE)"
+    ui_info_box "Thông tin đăng nhập" \
+        "Email: $admin_email" \
+        "Password: $admin_password" \
+        "Mode: $NOCODB_DATABASE_MODE"
+    
     return 0
 }
 
@@ -585,7 +616,7 @@ start_nocodb_service() {
 
 # Create separate database for NocoDB
 create_separate_nocodb_database() {
-    ui_info "Tạo database riêng cho NocoDB..."
+    ui_status "info" "Tạo database riêng cho NocoDB..."
     
     # Wait for PostgreSQL to be ready
     local max_wait=30
