@@ -301,7 +301,6 @@ cleanup_old_backups() {
 
 # ===== RESTORE FUNCTIONS =====
 
-# Restore từ backup (FIXED)
 restore_backup() {
     local backup_file="$1"
 
@@ -320,7 +319,32 @@ restore_backup() {
     log_info "📦 Đang giải nén backup..."
     tar -xzf "$backup_file" -C "$temp_dir"
 
+    # FIX: Tìm backup directory đúng cách
     local backup_dir=$(find "$temp_dir" -name "n8n_backup_*" -type d | head -1)
+    
+    if [[ -z "$backup_dir" || ! -d "$backup_dir" ]]; then
+        log_error "❌ Không tìm thấy backup directory trong archive"
+        rm -rf "$temp_dir"
+        return 1
+    fi
+
+    # FIX: Kiểm tra file database tồn tại với tên chính xác
+    local db_file=""
+    if [[ -f "$backup_dir/n8n_database.sql" ]]; then
+        db_file="$backup_dir/n8n_database.sql"
+    elif [[ -f "$backup_dir/database.sql" ]]; then
+        db_file="$backup_dir/database.sql"
+    elif [[ -f "$backup_dir/n8n_database.sql.gz" ]]; then
+        # Giải nén nếu file bị compress
+        gunzip "$backup_dir/n8n_database.sql.gz"
+        db_file="$backup_dir/n8n_database.sql"
+    else
+        log_error "❌ Không tìm thấy database backup file"
+        log_info "📋 Files có sẵn trong backup:"
+        ls -la "$backup_dir"
+        rm -rf "$temp_dir"
+        return 1
+    fi
 
     # Stop n8n
     log_info "⏹️ Dừng n8n services..."
@@ -332,30 +356,119 @@ restore_backup() {
     docker compose up -d postgres 2>/dev/null || sudo docker compose up -d postgres
     sleep 5
 
-    docker exec -i n8n-postgres psql -U n8n -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;" 2>/dev/null
-    docker exec -i n8n-postgres psql -U n8n n8n <"$backup_dir/database.sql"
+    # Wait for PostgreSQL to be ready
+    local max_wait=30
+    local waited=0
+    while [[ $waited -lt $max_wait ]]; do
+        if docker exec n8n-postgres pg_isready -U n8n >/dev/null 2>&1; then
+            break
+        fi
+        sleep 1
+        ((waited++))
+    done
 
-    # Restore data files
-    log_info "📁 Restore data files..."
-    local n8n_volume=$(docker volume inspect --format '{{ .Mountpoint }}' n8n_n8n_data)
+    # Drop and recreate schema
+    docker exec -i n8n-postgres psql -U n8n -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;" 2>/dev/null
     
-    # Remove old data and restore
-    if [[ -w "$n8n_volume" ]]; then
-        rm -rf "$n8n_volume"/*
-        tar -xzf "$backup_dir/n8n_data.tar.gz" -C "$n8n_volume"
+    # FIX: Restore với file đúng
+    if docker exec -i n8n-postgres psql -U n8n n8n < "$db_file"; then
+        log_success "✅ Database restore thành công"
     else
-        sudo rm -rf "$n8n_volume"/*
-        sudo tar -xzf "$backup_dir/n8n_data.tar.gz" -C "$n8n_volume"
+        log_error "❌ Database restore thất bại"
+        rm -rf "$temp_dir"
+        return 1
+    fi
+
+    # Restore data files nếu có
+    if [[ -f "$backup_dir/n8n_data.tar.gz" ]]; then
+        log_info "📁 Restore data files..."
+        local n8n_volume=$(docker volume inspect --format '{{ .Mountpoint }}' n8n_n8n_data 2>/dev/null)
+        
+        if [[ -n "$n8n_volume" ]]; then
+            # Remove old data and restore
+            if [[ -w "$n8n_volume" ]]; then
+                rm -rf "$n8n_volume"/*
+                tar -xzf "$backup_dir/n8n_data.tar.gz" -C "$n8n_volume"
+            else
+                sudo rm -rf "$n8n_volume"/*
+                sudo tar -xzf "$backup_dir/n8n_data.tar.gz" -C "$n8n_volume"
+            fi
+            log_success "✅ Data files restore thành công"
+        else
+            log_warning "⚠️ Không tìm thấy N8N data volume"
+        fi
+    fi
+
+    # Restore NocoDB nếu có
+    if [[ -f "$backup_dir/nocodb_data.tar.gz" ]]; then
+        log_info "🗄️ Restore NocoDB data..."
+        local nocodb_volume=$(docker volume inspect --format '{{ .Mountpoint }}' n8n_nocodb_data 2>/dev/null)
+        
+        if [[ -n "$nocodb_volume" ]]; then
+            if [[ -w "$nocodb_volume" ]]; then
+                rm -rf "$nocodb_volume"/*
+                tar -xzf "$backup_dir/nocodb_data.tar.gz" -C "$nocodb_volume"
+            else
+                sudo rm -rf "$nocodb_volume"/*
+                sudo tar -xzf "$backup_dir/nocodb_data.tar.gz" -C "$nocodb_volume"
+            fi
+            log_success "✅ NocoDB data restore thành công"
+        fi
+    fi
+
+    # Restore configuration files
+    if [[ -f "$backup_dir/docker-compose.yml" ]]; then
+        log_info "⚙️ Restore configuration..."
+        cp "$backup_dir/docker-compose.yml" /opt/n8n/ 2>/dev/null || \
+        sudo cp "$backup_dir/docker-compose.yml" /opt/n8n/
+        
+        if [[ -f "$backup_dir/.env" ]]; then
+            cp "$backup_dir/.env" /opt/n8n/ 2>/dev/null || \
+            sudo cp "$backup_dir/.env" /opt/n8n/
+        fi
+        
+        log_success "✅ Configuration restore thành công"
     fi
 
     # Start n8n
     log_info "▶️ Khởi động lại n8n..."
     docker compose up -d 2>/dev/null || sudo docker compose up -d
 
+    # Wait for N8N to be ready
+    log_info "⏳ Chờ N8N khởi động..."
+    local n8n_port=$(grep "N8N_PORT=" /opt/n8n/.env | cut -d'=' -f2 2>/dev/null || echo "5678")
+    
+    local max_wait=60
+    local waited=0
+    while [[ $waited -lt $max_wait ]]; do
+        if curl -s "http://localhost:$n8n_port/healthz" >/dev/null 2>&1; then
+            break
+        fi
+        sleep 2
+        ((waited += 2))
+    done
+
     # Cleanup
     rm -rf "$temp_dir"
 
-    log_success "✅ Restore hoàn tất!"
+    if [[ $waited -lt $max_wait ]]; then
+        log_success "✅ Restore hoàn tất thành công!"
+        
+        # Show restored info
+        local metadata_file="$backup_dir/metadata.json"
+        if [[ -f "$metadata_file" ]] && command_exists jq; then
+            local backup_timestamp=$(jq -r '.timestamp' "$metadata_file" 2>/dev/null || echo "unknown")
+            local n8n_version=$(jq -r '.components.n8n.version' "$metadata_file" 2>/dev/null || echo "unknown")
+            
+            log_info "📋 Restored from backup: $backup_timestamp"
+            log_info "📋 N8N version: $n8n_version"
+        fi
+        
+        return 0
+    else
+        log_error "❌ N8N không khởi động sau restore"
+        return 1
+    fi
 }
 
 # ===== CRON JOB MANAGEMENT =====
