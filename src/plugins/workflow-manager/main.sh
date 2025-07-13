@@ -130,6 +130,9 @@ make_api_call() {
     if [[ "$method" == "POST" ]]; then
         curl_args+=(-X POST -H "Content-Type: application/json")
         [[ -n "$data" ]] && curl_args+=(-d "$data")
+    elif [[ "$method" == "PUT" ]]; then
+        curl_args+=(-X PUT -H "Content-Type: application/json")
+        [[ -n "$data" ]] && curl_args+=(-d "$data")
     fi
     
     curl "${curl_args[@]}" "$N8N_API_BASE/$endpoint"
@@ -458,20 +461,30 @@ import_workflow_files() {
             continue
         fi
         
-        # Debug: show file structure
-        echo "📋 File structure: $(jq -c 'keys' "$file" 2>/dev/null)"
-        
-        # Try different data extraction methods
+        # Extract only required fields for N8N API
         local workflow_data=""
         
         # Method 1: Direct workflow object
         if jq -e '.name' "$file" >/dev/null 2>&1; then
-            workflow_data=$(jq 'del(.id) | del(.createdAt) | del(.updatedAt)' "$file" 2>/dev/null)
-            echo "✅ Using direct workflow format"
-        # Method 2: Nested data
+            # Extract required fields for N8N API
+            workflow_data=$(jq '{
+                name: .name,
+                nodes: .nodes,
+                connections: .connections,
+                settings: (.settings // {})
+            }' "$file" 2>/dev/null)
+            echo "✅ Using direct workflow format (core fields only)"
+            
+        # Method 2: Nested data format
         elif jq -e '.data.name' "$file" >/dev/null 2>&1; then
-            workflow_data=$(jq '.data | del(.id) | del(.createdAt) | del(.updatedAt)' "$file" 2>/dev/null)
+            workflow_data=$(jq '.data | {
+                name: .name,
+                nodes: .nodes,
+                connections: .connections,
+                settings: (.settings // {})
+            }' "$file" 2>/dev/null)
             echo "✅ Using nested data format"
+            
         else
             echo "❌ Unknown workflow format: $filename"
             failed=$((failed + 1))
@@ -484,18 +497,62 @@ import_workflow_files() {
             continue
         fi
         
-        # Import via API
-        echo "📤 Importing to N8N..."
-        local response=$(make_api_call "POST" "workflows" "$workflow_data")
+        # Validate required fields
+        local workflow_name=$(echo "$workflow_data" | jq -r '.name // ""')
+        local has_nodes=$(echo "$workflow_data" | jq -e '.nodes | length > 0' 2>/dev/null)
         
-        if echo "$response" | jq -e '.data.id' >/dev/null 2>&1; then
-            local new_id=$(echo "$response" | jq -r '.data.id')
-            local workflow_name=$(echo "$workflow_data" | jq -r '.name // "Unknown"')
-            echo "✅ Imported: $workflow_name (ID: $new_id)"
-            imported=$((imported + 1))
-        else
-            echo "❌ API Error: $(echo "$response" | jq -r '.message // "Unknown error"')"
+        if [[ -z "$workflow_name" ]]; then
+            echo "❌ Missing workflow name: $filename"
             failed=$((failed + 1))
+            continue
+        fi
+        
+        if ! $has_nodes; then
+            echo "❌ No nodes found: $filename"
+            failed=$((failed + 1))
+            continue
+        fi
+        
+        # Check if workflow with same name exists
+        echo "🔍 Checking for existing workflow: $workflow_name"
+        local existing_workflows=$(make_api_call "GET" "workflows")
+        local existing_id=$(echo "$existing_workflows" | jq -r ".data[] | select(.name==\"$workflow_name\") | .id" 2>/dev/null)
+        
+        if [[ -n "$existing_id" ]]; then
+            echo "⚠️  Workflow '$workflow_name' already exists (ID: $existing_id)"
+            echo -n "   Overwrite? [y/N]: "
+            read -r overwrite
+            
+            if [[ "$overwrite" =~ ^[Yy]$ ]]; then
+                # Update existing workflow
+                echo "📤 Updating existing workflow..."
+                local response=$(make_api_call "PUT" "workflows/$existing_id" "$workflow_data")
+                
+                if echo "$response" | jq -e '.id' >/dev/null 2>&1; then
+                    echo "✅ Updated: $workflow_name (ID: $existing_id)"
+                    imported=$((imported + 1))
+                else
+                    echo "❌ Update failed: $(echo "$response" | jq -r '.message // "Unknown error"')"
+                    failed=$((failed + 1))
+                fi
+            else
+                echo "⏭️  Skipped: $workflow_name"
+                continue
+            fi
+        else
+            # Create new workflow
+            echo "📤 Creating new workflow..."
+            local response=$(make_api_call "POST" "workflows" "$workflow_data")
+            
+            if echo "$response" | jq -e '.id' >/dev/null 2>&1; then
+                local new_id=$(echo "$response" | jq -r '.id')
+                echo "✅ Created: $workflow_name (ID: $new_id)"
+                imported=$((imported + 1))
+            else
+                echo "❌ Creation failed: $(echo "$response" | jq -r '.message // "Unknown error"')"
+                echo "🔍 Response: $response"
+                failed=$((failed + 1))
+            fi
         fi
     done
     
