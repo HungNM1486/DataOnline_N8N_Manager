@@ -140,18 +140,11 @@ get_workflow_count() {
 }
 
 check_gdrive() {
-    command_exists rclone && [[ -f "$HOME/.config/rclone/rclone.conf" ]]
+    command -v rclone >/dev/null 2>&1 && [[ -f "$HOME/.config/rclone/rclone.conf" ]]
 }
 
 get_gdrive_remote() {
-    rclone listremotes | while read -r line; do
-        local name="${line%:}"
-        local type=$(rclone config show "$name" | grep "type = " | cut -d' ' -f3 2>/dev/null)
-        if [[ "$type" == "drive" ]]; then
-            echo "$name"
-            return 0
-        fi
-    done
+    rclone listremotes | head -1 | sed 's/://'
 }
 
 # ===== LIST WORKFLOWS =====
@@ -217,10 +210,13 @@ export_menu() {
 }
 
 export_all_workflows() {
+    set +e  # Disable exit on error temporarily
+    
     local workflows=$(make_api_call "GET" "workflows")
     
     if ! echo "$workflows" | jq -e '.data' >/dev/null 2>&1; then
         ui_status "error" "Không thể lấy workflows"
+        set -e
         return 1
     fi
     
@@ -231,41 +227,63 @@ export_all_workflows() {
     local count=0
     local workflow_ids=($(echo "$workflows" | jq -r '.data[].id'))
     
+    echo "🔄 Exporting ${#workflow_ids[@]} workflows..."
     for id in "${workflow_ids[@]}"; do
         local workflow_data=$(echo "$workflows" | jq -r ".data[] | select(.id==\"$id\")")
         local name=$(echo "$workflow_data" | jq -r '.name' | sed 's/[^a-zA-Z0-9_-]/_/g')
         
         echo "$workflow_data" > "$temp_dir/${name}_${id}.json"
-        echo "Exported: $name"
-        ((count++))
+        echo "✅ Exported: $name"
+        count=$((count + 1))
     done
     
-    # Upload to Drive
-    local remote_name=$(get_gdrive_remote)
+    echo ""
+    echo "📊 Total exported: $count workflows"
+    echo "📁 Temp directory: $temp_dir"
     
-    echo "Uploading $count files to Google Drive..."
-    rclone mkdir "${remote_name}:${GDRIVE_FOLDER}" 2>/dev/null || true
+    # Force continue to Google Drive upload
+    echo "☁️  Starting Google Drive upload..."
     
-    if rclone copy "$temp_dir/" "${remote_name}:${GDRIVE_FOLDER}/" --include "*.json" --progress; then
-        ui_status "success" "✅ Uploaded $count workflows to Drive"
+    local remote_name="n8n"
+    
+    # Test connection
+    if rclone lsd "$remote_name:" >/dev/null 2>&1; then
+        echo "✅ Google Drive connection OK"
     else
-        ui_status "error" "❌ Upload failed"
+        echo "❌ Google Drive connection failed"
+        set -e
+        return 1
+    fi
+    
+    # Create folder and upload
+    rclone mkdir "$remote_name:n8n-workflows" 2>/dev/null || true
+    
+    echo "📤 Uploading to Google Drive..."
+    if rclone copy "$temp_dir/" "$remote_name:n8n-workflows/" --include "*.json" --progress; then
+        echo "✅ Upload successful!"
+        
+        # Verify
+        local uploaded=$(rclone ls "$remote_name:n8n-workflows/" --include "*.json" | wc -l)
+        echo "📊 Files on Drive: $uploaded"
+    else
+        echo "❌ Upload failed"
     fi
     
     rm -rf "$temp_dir"
+    set -e  # Re-enable strict mode
+    return 0
 }
 
 export_selected_workflows() {
-    # Get workflow list for selection
+    set +e  # Disable strict mode
+    
     local workflows=$(make_api_call "GET" "workflows")
     
     echo ""
     echo "📋 **Chọn workflows để export:**"
     echo ""
     
-    local -a workflow_data=()
     local index=1
-    
     echo "$workflows" | jq -c '.data[]' | while read -r workflow; do
         local id=$(echo "$workflow" | jq -r '.id')
         local name=$(echo "$workflow" | jq -r '.name')
@@ -273,8 +291,7 @@ export_selected_workflows() {
         local status=$([ "$active" = "true" ] && echo "🟢" || echo "🔴")
         
         echo "$index) $status $name (ID: $id)"
-        workflow_data+=("$workflow")
-        ((index++))
+        index=$((index + 1))
     done
     
     echo ""
@@ -287,7 +304,7 @@ export_selected_workflows() {
     local count=0
     IFS=',' read -ra INDICES <<< "$selections"
     for idx in "${INDICES[@]}"; do
-        idx=$(echo "$idx" | xargs) # trim whitespace
+        idx=$(echo "$idx" | xargs)
         if [[ "$idx" =~ ^[0-9]+$ ]]; then
             local workflow=$(echo "$workflows" | jq -c ".data[$((idx-1))]")
             if [[ "$workflow" != "null" ]]; then
@@ -297,18 +314,27 @@ export_selected_workflows() {
                 local full_workflow=$(make_api_call "GET" "workflows/$id")
                 echo "$full_workflow" > "$temp_dir/${name}_${id}.json"
                 echo "Exported: $name"
-                ((count++))
+                count=$((count + 1))
             fi
         fi
     done
     
     if [[ $count -gt 0 ]]; then
-        upload_to_gdrive "$temp_dir" "$count"
+        echo "☁️  Uploading $count workflows..."
+        local remote_name="n8n"
+        rclone mkdir "$remote_name:n8n-workflows" 2>/dev/null || true
+        
+        if rclone copy "$temp_dir/" "$remote_name:n8n-workflows/" --include "*.json" --progress; then
+            echo "✅ Upload successful!"
+        else
+            echo "❌ Upload failed"
+        fi
     else
-        ui_status "warning" "Không có workflow nào được export"
+        echo "⚠️  No workflows exported"
     fi
     
     rm -rf "$temp_dir"
+    set -e  # Re-enable strict mode
 }
 
 upload_to_gdrive() {
@@ -407,12 +433,14 @@ import_menu() {
 }
 
 import_workflow_files() {
-    local import_dir="$1"
+    set +e  # Disable strict mode
     
+    local import_dir="$1"
     local json_files=($(find "$import_dir" -name "*.json" -type f))
     
     if [[ ${#json_files[@]} -eq 0 ]]; then
-        ui_status "warning" "Không có file JSON để import"
+        echo "⚠️  No JSON files found"
+        set -e
         return 1
     fi
     
@@ -421,39 +449,59 @@ import_workflow_files() {
     
     for file in "${json_files[@]}"; do
         local filename=$(basename "$file")
+        echo "🔄 Processing: $filename"
         
         # Validate JSON
         if ! jq empty "$file" 2>/dev/null; then
-            ui_status "error" "Invalid JSON: $filename"
-            ((failed++))
+            echo "❌ Invalid JSON: $filename"
+            failed=$((failed + 1))
             continue
         fi
         
-        # Prepare workflow data
-        local workflow_data=$(jq 'del(.data.id) | del(.id) | .data // .' "$file" 2>/dev/null)
+        # Debug: show file structure
+        echo "📋 File structure: $(jq -c 'keys' "$file" 2>/dev/null)"
         
-        if [[ -z "$workflow_data" ]]; then
-            ui_status "error" "Invalid workflow data: $filename"
-            ((failed++))
+        # Try different data extraction methods
+        local workflow_data=""
+        
+        # Method 1: Direct workflow object
+        if jq -e '.name' "$file" >/dev/null 2>&1; then
+            workflow_data=$(jq 'del(.id) | del(.createdAt) | del(.updatedAt)' "$file" 2>/dev/null)
+            echo "✅ Using direct workflow format"
+        # Method 2: Nested data
+        elif jq -e '.data.name' "$file" >/dev/null 2>&1; then
+            workflow_data=$(jq '.data | del(.id) | del(.createdAt) | del(.updatedAt)' "$file" 2>/dev/null)
+            echo "✅ Using nested data format"
+        else
+            echo "❌ Unknown workflow format: $filename"
+            failed=$((failed + 1))
+            continue
+        fi
+        
+        if [[ -z "$workflow_data" || "$workflow_data" == "null" ]]; then
+            echo "❌ No valid workflow data: $filename"
+            failed=$((failed + 1))
             continue
         fi
         
         # Import via API
+        echo "📤 Importing to N8N..."
         local response=$(make_api_call "POST" "workflows" "$workflow_data")
         
         if echo "$response" | jq -e '.data.id' >/dev/null 2>&1; then
             local new_id=$(echo "$response" | jq -r '.data.id')
             local workflow_name=$(echo "$workflow_data" | jq -r '.name // "Unknown"')
-            ui_status "success" "✅ Imported: $workflow_name (ID: $new_id)"
-            ((imported++))
+            echo "✅ Imported: $workflow_name (ID: $new_id)"
+            imported=$((imported + 1))
         else
-            ui_status "error" "❌ Failed: $filename"
-            ((failed++))
+            echo "❌ API Error: $(echo "$response" | jq -r '.message // "Unknown error"')"
+            failed=$((failed + 1))
         fi
     done
     
     echo ""
-    ui_status "info" "📊 Import completed: $imported success, $failed failed"
+    echo "📊 Import completed: $imported success, $failed failed"
+    set -e  # Re-enable strict mode
 }
 
 # Export main function
