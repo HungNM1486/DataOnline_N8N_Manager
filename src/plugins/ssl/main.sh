@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# DataOnline N8N Manager - SSL Automation Plugin
-# Phiên bản: 1.0.0
+# DataOnline N8N Manager - SSL Automation Plugin (FIXED)
+# Phiên bản: 1.0.3 - Fixed Nginx Config Order
 
 set -euo pipefail
 
@@ -50,14 +50,15 @@ validate_domain_dns() {
     fi
 }
 
-# ===== NGINX CONFIGURATION =====
+# ===== NGINX CONFIGURATION (FIXED) =====
 
-create_nginx_ssl_config() {
+# FIXED: Create HTTP-only config first, then upgrade to HTTPS
+create_nginx_http_config() {
     local domain="$1"
     local n8n_port="${2:-5678}"
     local nginx_conf="/etc/nginx/sites-available/${domain}.conf"
 
-    ui_section "Tạo cấu hình Nginx SSL"
+    ui_section "Tạo cấu hình Nginx HTTP"
 
     # Step 1: Create webroot directory
     if ! ui_run_command "Tạo webroot directory" "
@@ -68,8 +69,80 @@ create_nginx_ssl_config() {
         return 1
     fi
 
-    # Step 2: Create nginx config file
-    ui_start_spinner "Tạo file cấu hình Nginx"
+    # Step 2: Create HTTP-only nginx config for certification
+    ui_start_spinner "Tạo HTTP config cho Let's Encrypt"
+
+    cat >"$nginx_conf" <<EOF
+server {
+    listen 80;
+    server_name $domain;
+
+    # Let's Encrypt challenge
+    location /.well-known/acme-challenge/ {
+        root $WEBROOT_PATH;
+        allow all;
+    }
+
+    # Temporary: Proxy to N8N for testing
+    location / {
+        proxy_pass http://127.0.0.1:$n8n_port;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        
+        proxy_buffering off;
+        proxy_read_timeout 7200s;
+        proxy_send_timeout 7200s;
+    }
+}
+EOF
+
+    ui_stop_spinner
+    ui_status "success" "HTTP config tạo thành công"
+
+    # Step 3: Enable site
+    if ! ui_run_command "Enable nginx site" "
+        ln -sf $nginx_conf /etc/nginx/sites-enabled/
+    "; then
+        return 1
+    fi
+
+    # Step 4: Test nginx config
+    if ! ui_run_command "Test nginx configuration" "nginx -t"; then
+        ui_status "error" "Nginx config có lỗi"
+        rm -f "/etc/nginx/sites-enabled/$(basename $nginx_conf)"
+        return 1
+    fi
+
+    # Step 5: Reload nginx
+    if ! ui_run_command "Reload nginx" "systemctl reload nginx"; then
+        return 1
+    fi
+
+    ui_status "success" "Nginx HTTP config hoạt động"
+    return 0
+}
+
+# Create HTTPS config after obtaining certificate
+create_nginx_ssl_config() {
+    local domain="$1"
+    local n8n_port="${2:-5678}"
+    local nginx_conf="/etc/nginx/sites-available/${domain}.conf"
+
+    ui_section "Nâng cấp lên HTTPS config"
+
+    # Verify SSL files exist
+    if [[ ! -f "/etc/letsencrypt/live/$domain/fullchain.pem" ]]; then
+        ui_status "error" "SSL certificate không tồn tại"
+        return 1
+    fi
+
+    ui_start_spinner "Tạo HTTPS config"
 
     cat >"$nginx_conf" <<EOF
 server {
@@ -93,6 +166,7 @@ server {
     ssl_certificate /etc/letsencrypt/live/$domain/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/$domain/privkey.pem;
     
+    # Include Let's Encrypt options if available
     include /etc/letsencrypt/options-ssl-nginx.conf;
     ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
 
@@ -132,49 +206,18 @@ EOF
 
     ui_stop_spinner
 
-    # Step 3: Verify config file was created
-    if [[ ! -f "$nginx_conf" ]]; then
-        ui_status "error" "Không thể tạo file config: $nginx_conf"
+    # Test nginx config
+    if ! ui_run_command "Test HTTPS configuration" "nginx -t"; then
+        ui_status "error" "HTTPS config có lỗi"
         return 1
     fi
 
-    # Step 4: Verify config file has content
-    if [[ ! -s "$nginx_conf" ]]; then
-        ui_status "error" "File config trống: $nginx_conf"
+    # Reload nginx
+    if ! ui_run_command "Reload nginx với HTTPS" "systemctl reload nginx"; then
         return 1
     fi
 
-    ui_status "success" "Đã tạo file cấu hình: $nginx_conf ($(wc -l <"$nginx_conf") dòng)"
-
-    # Step 5: Enable site
-    if ! ui_run_command "Enable nginx site" "
-        ln -sf $nginx_conf /etc/nginx/sites-enabled/
-    "; then
-        return 1
-    fi
-
-    # Step 6: Test nginx config
-    if ! ui_run_command "Test nginx configuration" "nginx -t"; then
-        ui_status "error" "Nginx config có lỗi, removing site"
-        rm -f "/etc/nginx/sites-enabled/$(basename $nginx_conf)"
-        return 1
-    fi
-
-    # Step 7: Reload nginx
-    if ! ui_run_command "Reload nginx" "systemctl reload nginx"; then
-        return 1
-    fi
-
-    # Step 8: Verify nginx is listening on 443
-    sleep 2
-    if ss -tlpn | grep -q ":443"; then
-        ui_status "success" "Nginx đang listen trên port 443"
-    else
-        ui_status "warning" "Nginx chưa listen trên port 443, kiểm tra logs"
-        tail -n 5 /var/log/nginx/error.log | sed 's/^/  /'
-        return 1
-    fi
-
+    ui_status "success" "HTTPS config hoạt động"
     return 0
 }
 
@@ -184,93 +227,29 @@ verify_ssl_setup() {
 
     ui_section "Xác minh cài đặt SSL"
 
-    # 1. Kiểm tra N8N có đang chạy
-    local n8n_running=false
-
+    # Check N8N running
     if command_exists docker && docker ps | grep -q "n8n"; then
         ui_status "success" "N8N đang chạy trong Docker"
-        n8n_running=true
     elif systemctl is-active --quiet n8n; then
         ui_status "success" "N8N service đang chạy"
-        n8n_running=true
     else
-        ui_status "warning" "N8N có thể không chạy, đang kiểm tra port..."
-        if netstat -tulpn | grep -q ":$n8n_port "; then
-            ui_status "success" "Port $n8n_port đang hoạt động"
-            n8n_running=true
-        else
-            ui_status "error" "N8N không chạy, đang khởi động..."
-            # Thử khởi động N8N
-            if [[ -f "/opt/n8n/docker-compose.yml" ]]; then
-                ui_run_command "Khởi động N8N" "
-                    cd /opt/n8n && docker compose up -d
-                "
-            fi
+        ui_status "warning" "N8N có thể không chạy"
+        if [[ -f "/opt/n8n/docker-compose.yml" ]]; then
+            ui_run_command "Khởi động N8N" "cd /opt/n8n && docker compose up -d"
         fi
     fi
 
-    # 2. Kiểm tra file cấu hình Nginx
-    local nginx_conf="/etc/nginx/sites-available/${domain}.conf"
-    if [[ ! -f "$nginx_conf" ]]; then
-        ui_status "error" "File cấu hình Nginx không tồn tại: $nginx_conf"
-        create_nginx_ssl_config "$domain" "$n8n_port"
-    else
-        ui_status "success" "File cấu hình Nginx tồn tại"
-    fi
-
-    # 3. Kiểm tra nội dung file cấu hình
-    ui_run_command "Kiểm tra cấu hình proxy pass" "
-        if ! grep -q 'proxy_pass http://127.0.0.1:$n8n_port' $nginx_conf; then
-            # Sửa port không đúng
-            sed -i 's|proxy_pass http://127.0.0.1:[0-9]*|proxy_pass http://127.0.0.1:$n8n_port|' $nginx_conf
-        fi
-    "
-
-    # 4. Kiểm tra Nginx đang chạy
-    if ! systemctl is-active --quiet nginx; then
-        ui_run_command "Khởi động Nginx" "systemctl restart nginx"
-    else
-        ui_run_command "Tải lại cấu hình Nginx" "nginx -t && systemctl reload nginx"
-    fi
-
-    # 5. Cập nhật file hosts (để test)
-    ui_run_command "Cập nhật local hosts" "
-        if ! grep -q '$domain' /etc/hosts; then
-            echo '127.0.0.1 $domain' >> /etc/hosts
-        fi
-    "
-
-    # 6. Kiểm tra kết nối
-    ui_info "Đang kiểm tra kết nối HTTPS..."
-    local https_works=false
-
+    # Check HTTPS connection
+    ui_start_spinner "Kiểm tra kết nối HTTPS"
     if curl -s -k "https://$domain" >/dev/null 2>&1; then
-        ui_status "success" "Kết nối HTTPS hoạt động"
-        https_works=true
+        ui_stop_spinner
+        ui_status "success" "HTTPS hoạt động: https://$domain"
+        return 0
     else
-        ui_status "error" "Không thể kết nối HTTPS"
-
-        # Hiển thị logs
-        ui_info "10 dòng cuối logs Nginx:"
-        tail -n 10 "/var/log/nginx/$domain.error.log"
+        ui_stop_spinner
+        ui_status "error" "HTTPS không hoạt động"
+        return 1
     fi
-
-    if $n8n_running && ! $https_works; then
-        ui_info "N8N đang chạy nhưng HTTPS không hoạt động. Kiểm tra cấu hình Nginx..."
-        ui_run_command "Thêm debug logs" "
-            sed -i 's|error_log /var/log/nginx/\$host.error.log;|error_log /var/log/nginx/\$host.error.log debug;|' $nginx_conf
-            systemctl reload nginx
-        "
-    fi
-
-    # Hiển thị thông tin hữu ích
-    ui_info "Thông tin cấu hình:"
-    echo "- Domain: $domain"
-    echo "- N8N Port: $n8n_port"
-    echo "- SSL Cert: /etc/letsencrypt/live/$domain/fullchain.pem"
-    echo "- Nginx Config: $nginx_conf"
-
-    return $([[ "$https_works" == "true" ]] && echo 0 || echo 1)
 }
 
 # ===== SSL CERTIFICATE =====
@@ -287,79 +266,59 @@ install_certbot() {
     "
 }
 
+# FIXED: Simplified certificate acquisition
 obtain_ssl_certificate() {
     local domain="$1"
     local email="$2"
 
-    # Kiểm tra DNS
-    ui_run_command "Kiểm tra DNS settings" "
-        echo 'nameserver 8.8.8.8' > /etc/resolv.conf.temp
-        echo 'nameserver 1.1.1.1' >> /etc/resolv.conf.temp
-        cp /etc/resolv.conf /etc/resolv.conf.backup || true
-        cp /etc/resolv.conf.temp /etc/resolv.conf
-    "
-
-    # Create webroot directory with proper permissions
-    ui_run_command "Chuẩn bị webroot cho HTTP challenge" "
-        mkdir -p $WEBROOT_PATH/.well-known/acme-challenge
-        chown -R www-data:www-data $WEBROOT_PATH
-        chmod -R 755 $WEBROOT_PATH
-    "
-
-    # Create initial HTTP-only config for verification
-    local temp_conf="/etc/nginx/sites-available/${domain}_temp.conf"
-
-    ui_run_command "Tạo cấu hình tạm cho HTTP challenge" "
-        cat > $temp_conf << EOF
-server {
-    listen 80;
-    server_name $domain;
-
-    root $WEBROOT_PATH;
+    ui_start_spinner "Lấy chứng chỉ SSL từ Let's Encrypt"
     
-    location /.well-known/acme-challenge/ {
-        allow all;
-    }
+    local certbot_output
+    local certbot_exit_code=0
     
-    location / {
-        return 200 'SSL setup in progress';
-        add_header Content-Type text/plain;
-    }
-}
-EOF
-        ln -sf $temp_conf /etc/nginx/sites-enabled/
-        nginx -t && systemctl reload nginx
-        
-        # Test if the config is working
-        sleep 2
-        curl -s http://localhost/.well-known/acme-challenge/test-file > /dev/null
-    "
-
-    # Create test file in acme-challenge directory
-    local test_path="$WEBROOT_PATH/.well-known/acme-challenge/test-file"
-    echo "Certbot test" >"$test_path"
-    chmod 644 "$test_path"
-    chown www-data:www-data "$test_path"
-
-    # Obtain certificate
-    if ! ui_run_command "Lấy chứng chỉ SSL từ Let's Encrypt" "
-        certbot certonly --webroot \
-            -w $WEBROOT_PATH \
-            -d $domain \
-            --agree-tos \
-            --email $email \
-            --non-interactive \
-            --force-renewal
-    "; then
-        rm -f "/etc/nginx/sites-enabled/$(basename $temp_conf)"
-        systemctl reload nginx
-        return 1
+    certbot_output=$(certbot certonly --webroot \
+        -w $WEBROOT_PATH \
+        -d $domain \
+        --agree-tos \
+        --email $email \
+        --non-interactive \
+        --force-renewal 2>&1) || certbot_exit_code=$?
+    
+    ui_stop_spinner
+    
+    # Check for rate limit error
+    if [[ $certbot_exit_code -ne 0 ]]; then
+        if echo "$certbot_output" | grep -q "too many certificates.*already issued"; then
+            ui_status "error" "❌ Let's Encrypt rate limit exceeded"
+            
+            ui_warning_box "Rate Limit Exceeded" \
+                "Domain đã vượt quá 5 certificates/tuần" \
+                "Cần chờ đến tuần sau để thử lại" \
+                "Hoặc sử dụng subdomain khác"
+            
+            echo "Giải pháp thay thế:"
+            echo "1) Sử dụng subdomain: app.$domain"
+            echo "2) Test với staging: certbot --staging"
+            echo "3) Sử dụng self-signed certificate tạm thời"
+            echo ""
+            
+            echo -n -e "${UI_YELLOW}Tạo self-signed certificate tạm thời? [Y/n]: ${UI_NC}"
+            read -r use_self_signed
+            
+            if [[ ! "$use_self_signed" =~ ^[Nn]$ ]]; then
+                return create_self_signed_certificate "$domain"
+            else
+                return 1
+            fi
+        else
+            ui_status "error" "❌ Certbot failed with other error"
+            echo "Error details:"
+            echo "$certbot_output" | tail -5
+            return 1
+        fi
     fi
 
-    # Remove temp config
-    rm -f "/etc/nginx/sites-enabled/$(basename $temp_conf)"
-
-    # Download SSL options if needed
+    # Download SSL options after successful certificate
     if [[ ! -f /etc/letsencrypt/options-ssl-nginx.conf ]]; then
         ui_run_command "Tải cấu hình SSL" "
             curl -s https://raw.githubusercontent.com/certbot/certbot/master/certbot-nginx/certbot_nginx/_internal/tls_configs/options-ssl-nginx.conf -o /etc/letsencrypt/options-ssl-nginx.conf
@@ -372,14 +331,91 @@ EOF
         "
     fi
 
+    ui_status "success" "✅ Let's Encrypt certificate thành công"
     return 0
 }
 
-cleanup_dns_settings() {
-    # Khôi phục file resolv.conf cũ nếu có
-    if [[ -f /etc/resolv.conf.backup ]]; then
-        mv /etc/resolv.conf.backup /etc/resolv.conf
-    fi
+# Create self-signed certificate as fallback
+create_self_signed_certificate() {
+    local domain="$1"
+    
+    ui_start_spinner "Tạo self-signed certificate cho $domain"
+    
+    # Create directory for self-signed certs
+    mkdir -p "/etc/ssl/self-signed"
+    
+    # Generate private key and certificate
+    openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+        -keyout "/etc/ssl/self-signed/$domain.key" \
+        -out "/etc/ssl/self-signed/$domain.crt" \
+        -subj "/C=VN/ST=HN/L=Hanoi/O=DataOnline/CN=$domain" 2>/dev/null
+    
+    ui_stop_spinner
+    
+    # Create self-signed HTTPS config
+    create_self_signed_nginx_config "$domain"
+    
+    ui_status "success" "✅ Self-signed certificate created"
+    
+    ui_warning_box "Self-Signed Certificate Warning" \
+        "⚠️  Browser sẽ hiển thị cảnh báo security" \
+        "✅ HTTPS vẫn hoạt động (với warning)" \
+        "💡 Có thể thử Let's Encrypt lại sau 1 tuần"
+        
+    return 0
+}
+
+create_self_signed_nginx_config() {
+    local domain="$1"
+    local n8n_port="${2:-5678}"
+    local nginx_conf="/etc/nginx/sites-available/${domain}.conf"
+    
+    cat >"$nginx_conf" <<EOF
+server {
+    listen 80;
+    server_name $domain;
+
+    location / {
+        return 301 https://\$host\$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl http2;
+    server_name $domain;
+
+    ssl_certificate /etc/ssl/self-signed/$domain.crt;
+    ssl_certificate_key /etc/ssl/self-signed/$domain.key;
+    
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+    ssl_prefer_server_ciphers on;
+
+    client_max_body_size 100M;
+    
+    access_log /var/log/nginx/$domain.access.log;
+    error_log /var/log/nginx/$domain.error.log;
+
+    location / {
+        proxy_pass http://127.0.0.1:$n8n_port;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        
+        proxy_buffering off;
+        proxy_read_timeout 7200s;
+        proxy_send_timeout 7200s;
+    }
+}
+EOF
+
+    # Test and reload
+    nginx -t && systemctl reload nginx
 }
 
 # ===== AUTO-RENEWAL =====
@@ -410,10 +446,6 @@ EOF
     "
 
     ui_status "success" "Auto-renewal đã được cấu hình"
-    ui_info_box "Thông tin auto-renewal" \
-        "Certbot sẽ tự động kiểm tra gia hạn 2 lần/ngày" \
-        "Chứng chỉ sẽ được gia hạn khi còn < 30 ngày" \
-        "Nginx sẽ tự động reload sau khi gia hạn"
 }
 
 # ===== DOCKER CONFIGURATION UPDATE =====
@@ -449,116 +481,7 @@ update_n8n_ssl_config() {
     config_set "n8n.webhook_url" "https://$domain"
 }
 
-# Chẩn đoán và khắc phục vấn đề SSL
-debug_ssl_setup() {
-    local domain="$1"
-
-    ui_header "Chẩn đoán vấn đề SSL"
-
-    # 1. Kiểm tra DNS
-    ui_section "1. Kiểm tra cấu hình DNS"
-    local server_ip=$(get_public_ip)
-    local resolved_ip=$(dig +short A "$domain" @1.1.1.1 | tail -n1)
-
-    if [[ -z "$resolved_ip" || "$resolved_ip" != "$server_ip" ]]; then
-        ui_status "error" "DNS không trỏ đúng: $domain → ${resolved_ip:-'không tìm thấy'} (cần: $server_ip)"
-        echo "Vui lòng cập nhật DNS record để trỏ đến IP server: $server_ip"
-        echo "Sau khi cập nhật DNS, đợi 5-10 phút để thay đổi có hiệu lực rồi thử lại."
-    else
-        ui_status "success" "DNS đã trỏ đúng: $domain → $server_ip"
-    fi
-
-    # 2. Kiểm tra cấu hình Nginx
-    ui_section "2. Kiểm tra cấu hình Nginx"
-    local webroot_path="$WEBROOT_PATH"
-
-    if [[ ! -d "$webroot_path" ]]; then
-        ui_run_command "Tạo thư mục webroot" "mkdir -p $webroot_path"
-    fi
-
-    ui_run_command "Cấp quyền cho webroot" "
-        chown -R www-data:www-data $webroot_path
-        chmod -R 755 $webroot_path
-    "
-
-    # Tạo file test
-    local test_file="$webroot_path/ssl-test.txt"
-    echo "SSL setup test file" >"$test_file"
-    chown www-data:www-data "$test_file"
-
-    # Tạo cấu hình tạm thời cho Nginx
-    ui_run_command "Cấu hình Nginx tạm thời" "
-        cat > /etc/nginx/sites-available/${domain}_debug.conf << EOF
-server {
-    listen 80;
-    server_name $domain;
-    
-    location / {
-        root $webroot_path;
-        try_files \$uri \$uri/ =404;
-    }
-    
-    location /.well-known/acme-challenge/ {
-        root $webroot_path;
-        try_files \$uri =404;
-    }
-}
-EOF
-        ln -sf /etc/nginx/sites-available/${domain}_debug.conf /etc/nginx/sites-enabled/
-        nginx -t && systemctl reload nginx
-    "
-
-    # 3. Kiểm tra truy cập từ bên ngoài
-    ui_section "3. Kiểm tra truy cập HTTP"
-    ui_info "Đang kiểm tra truy cập HTTP đến $domain..."
-
-    if curl -s -o /dev/null -w "%{http_code}" "http://$domain" | grep -q "200\|301\|302"; then
-        ui_status "success" "Có thể truy cập HTTP đến $domain"
-    else
-        ui_status "error" "Không thể truy cập HTTP đến $domain"
-        ui_info "Kiểm tra iptables/firewalld để đảm bảo port 80 đã mở"
-    fi
-
-    # 4. Kiểm tra truy cập đến file test
-    ui_info "Đang kiểm tra truy cập đến file test..."
-    if curl -s -o /dev/null -w "%{http_code}" "http://$domain/ssl-test.txt" | grep -q "200"; then
-        ui_status "success" "Có thể truy cập file test"
-    else
-        ui_status "error" "Không thể truy cập file test"
-        ui_info "Kiểm tra quyền file và cấu hình Nginx"
-    fi
-
-    # 5. Kiểm tra certbot logs
-    ui_section "4. Xem logs Let's Encrypt"
-    if [[ -f "/var/log/letsencrypt/letsencrypt.log" ]]; then
-        ui_info "5 dòng cuối của log certbot:"
-        tail -n 5 /var/log/letsencrypt/letsencrypt.log | while read -r line; do
-            ui_info "  $line"
-        done
-    fi
-
-    ui_section "Các bước khắc phục"
-    echo "1) Đảm bảo domain $domain trỏ đúng về IP server: $server_ip"
-    echo "2) Đảm bảo port 80 đã mở (kiểm tra firewall)"
-    echo "3) Kiểm tra nginx đã chạy: systemctl status nginx"
-    echo "4) Thử cài đặt SSL với certbot trực tiếp:"
-    echo "   certbot certonly --webroot -w $webroot_path -d $domain"
-    echo ""
-
-    # Xóa file test và cấu hình tạm thời
-    rm -f "$test_file"
-
-    ui_section "Các bước khắc phục"
-    echo "1) Đảm bảo domain $domain trỏ đúng về IP server: $server_ip"
-    echo "2) Đảm bảo kết nối internet hoạt động và có thể phân giải DNS"
-    echo "3) Thử lệnh này để kiểm tra DNS: dig acme-v02.api.letsencrypt.org"
-    echo "4) Kiểm tra file /etc/resolv.conf có nameserver hợp lệ"
-    echo "5) Thử cài đặt SSL với certbot trực tiếp:"
-    echo "   certbot certonly --webroot -w $WEBROOT_PATH -d $domain"
-    echo ""
-}
-
-# ===== MAIN SSL SETUP FUNCTION =====
+# ===== MAIN SSL SETUP FUNCTION (FIXED) =====
 
 setup_ssl_main() {
     ui_header "Cài đặt SSL với Let's Encrypt"
@@ -615,93 +538,41 @@ setup_ssl_main() {
         ui_status "warning" "DNS validation thất bại nhưng tiếp tục"
     fi
 
-    # Kiểm tra kết nối internet
-    ui_run_command "Kiểm tra kết nối internet" "
-        ping -c 3 8.8.8.8 > /dev/null || ping -c 3 1.1.1.1 > /dev/null
-    " || {
-        ui_status "error" "❌ Không thể kết nối internet. Vui lòng kiểm tra lại kết nối mạng."
-        return 1
-    }
-
-    # Kiểm tra DNS resolution
-    ui_run_command "Kiểm tra phân giải DNS" "
-        host acme-v02.api.letsencrypt.org > /dev/null || nslookup acme-v02.api.letsencrypt.org > /dev/null
-    " || {
-        ui_status "warning" "⚠️ Có vấn đề với phân giải DNS. Đang cấu hình DNS tạm thời..."
-        echo 'nameserver 8.8.8.8' >/etc/resolv.conf.temp
-        echo 'nameserver 1.1.1.1' >>/etc/resolv.conf.temp
-        cp /etc/resolv.conf /etc/resolv.conf.backup || true
-        cp /etc/resolv.conf.temp /etc/resolv.conf
-    }
-
     # Install dependencies
     install_certbot || return 1
 
-    # Attempt to obtain SSL certificate
-    if ! obtain_ssl_certificate "$domain" "$email"; then
-        ui_status "error" "❌ Lấy chứng chỉ SSL từ Let's Encrypt - Thất bại"
-
-        # Khôi phục DNS settings
-        cleanup_dns_settings
-
-        echo -n -e "${UI_YELLOW}Bạn có muốn tiến hành chẩn đoán sự cố? [Y/n]: ${UI_NC}"
-        read -r debug_confirm
-        if [[ ! "$debug_confirm" =~ ^[Nn]$ ]]; then
-            debug_ssl_setup "$domain"
-        fi
-
+    # FIXED: Create HTTP config first
+    if ! create_nginx_http_config "$domain" "$n8n_port"; then
         return 1
     fi
 
-    # Khôi phục DNS settings
-    cleanup_dns_settings
-    # Create Nginx configuration
-    create_nginx_ssl_config "$domain" "$n8n_port" || return 1
+    # Attempt to obtain SSL certificate
+    if ! obtain_ssl_certificate "$domain" "$email"; then
+        ui_status "error" "❌ SSL certificate setup thất bại"
+        return 1
+    fi
+
+    # FIXED: Only create HTTPS config after certificate exists
+    if [[ -f "/etc/letsencrypt/live/$domain/fullchain.pem" ]]; then
+        # Create full HTTPS config
+        create_nginx_ssl_config "$domain" "$n8n_port" || return 1
+        
+        # Setup auto-renewal
+        setup_auto_renewal || return 1
+    fi
 
     # Update N8N configuration
     update_n8n_ssl_config "$domain" || return 1
 
-    # Setup auto-renewal
-    setup_auto_renewal || return 1
-
     # Final verification
-    ui_section "Kiểm tra SSL"
-
-    if ! verify_ssl_setup "$domain" "$n8n_port"; then
-        ui_status "warning" "SSL đã được cấu hình nhưng có thể có vấn đề với kết nối"
-        echo -n -e "${UI_YELLOW}Bạn có muốn thử khởi động lại N8N? [Y/n]: ${UI_NC}"
-        read -r restart_confirm
-
-        if [[ ! "$restart_confirm" =~ ^[Nn]$ ]]; then
-            if [[ -f "/opt/n8n/docker-compose.yml" ]]; then
-                ui_run_command "Khởi động lại N8N" "
-                    cd /opt/n8n && docker compose restart
-                "
-            elif systemctl is-active --quiet n8n; then
-                ui_run_command "Khởi động lại N8N" "systemctl restart n8n"
-            fi
-
-            # Đợi N8N khởi động
-            sleep 5
-
-            # Kiểm tra lại
-            verify_ssl_setup "$domain" "$n8n_port"
-        fi
-
-        ui_info "Gợi ý khắc phục:"
-        echo "1) Kiểm tra N8N đang chạy: docker ps | grep n8n"
-        echo "2) Xem logs N8N: cd /opt/n8n && docker compose logs n8n"
-        echo "3) Kiểm tra cấu hình Nginx: sudo nginx -t"
-        echo "4) Xem logs Nginx: sudo tail -n 50 /var/log/nginx/$domain.error.log"
+    if verify_ssl_setup "$domain" "$n8n_port"; then
+        ui_info_box "SSL setup hoàn tất!" \
+            "✅ Chứng chỉ SSL đã được cài đặt" \
+            "✅ N8N đã được cập nhật cho HTTPS" \
+            "🌐 Truy cập: https://$domain"
     else
-        ui_status "success" "SSL hoạt động: https://$domain"
+        ui_status "warning" "SSL đã cấu hình nhưng có thể cần điều chỉnh"
     fi
-
-    ui_info_box "SSL setup hoàn tất!" \
-        "✅ Chứng chỉ SSL đã được cài đặt" \
-        "✅ Auto-renewal đã được cấu hình" \
-        "✅ N8N đã được cập nhật cho HTTPS" \
-        "🌐 Truy cập: https://$domain"
 
     return 0
 }

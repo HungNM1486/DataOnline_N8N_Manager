@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # DataOnline N8N Manager - NocoDB Setup & Docker Integration
-# Phiên bản: 1.0.2 - Dual Database Options (Shared/Separate)
+# Phiên bản: 1.0.3 - Custom Domain Support
 
 set -euo pipefail
 
@@ -9,6 +9,73 @@ set -euo pipefail
 NOCODB_DATABASE_MODE=""  # "shared" or "separate"
 NOCODB_DB_NAME=""
 NOCODB_DB_PASSWORD=""
+NOCODB_DOMAIN=""  # Custom domain from user
+
+# ===== DOMAIN CONFIGURATION =====
+
+ask_nocodb_domain() {
+    ui_section "Cấu hình Domain cho NocoDB"
+    
+    local main_domain=$(config_get "n8n.domain" "")
+    
+    echo "📊 **Lựa chọn domain cho NocoDB:**"
+    echo ""
+    echo "1) 🔗 Sử dụng subdomain tự động: db.$main_domain"
+    echo "2) 🏠 Nhập domain riêng (VD: nocodb.company.com)"
+    echo "3) 📱 Chỉ sử dụng IP:Port (không domain)"
+    echo ""
+    
+    while true; do
+        read -p "Chọn [1-3]: " domain_choice
+        
+        case "$domain_choice" in
+        1)
+            if [[ -n "$main_domain" ]]; then
+                NOCODB_DOMAIN="db.$main_domain"
+                ui_status "success" "Sử dụng subdomain: $NOCODB_DOMAIN"
+                break
+            else
+                ui_status "error" "Chưa có domain chính N8N"
+                echo -n -e "${UI_WHITE}Nhập domain chính N8N: ${UI_NC}"
+                read -r main_domain
+                if [[ -n "$main_domain" ]]; then
+                    config_set "n8n.domain" "$main_domain"
+                    NOCODB_DOMAIN="db.$main_domain"
+                    ui_status "success" "Sử dụng subdomain: $NOCODB_DOMAIN"
+                    break
+                fi
+            fi
+            ;;
+        2)
+            echo -n -e "${UI_WHITE}Nhập domain cho NocoDB: ${UI_NC}"
+            read -r custom_domain
+            
+            if [[ -z "$custom_domain" ]]; then
+                ui_status "error" "Domain không được để trống"
+                continue
+            fi
+            
+            if ui_validate_domain "$custom_domain"; then
+                NOCODB_DOMAIN="$custom_domain"
+                ui_status "success" "Sử dụng domain: $NOCODB_DOMAIN"
+                break
+            else
+                ui_status "error" "Domain không hợp lệ"
+            fi
+            ;;
+        3)
+            NOCODB_DOMAIN=""
+            ui_status "info" "Sử dụng IP:Port (không cần domain)"
+            break
+            ;;
+        *)
+            ui_status "error" "Lựa chọn không hợp lệ"
+            ;;
+        esac
+    done
+    
+    return 0
+}
 
 # ===== DATABASE PREFERENCE SELECTION =====
 
@@ -56,7 +123,12 @@ ask_database_preference() {
 setup_nocodb_integration() {
     ui_section "Cài đặt NocoDB Integration"
 
-    # Ask database preference first
+    # Ask domain preference first
+    if ! ask_nocodb_domain; then
+        return 1
+    fi
+
+    # Ask database preference
     if ! ask_database_preference; then
         return 1
     fi
@@ -85,12 +157,14 @@ setup_nocodb_integration() {
         return 1
     fi
     
-    # SSL setup option
-    echo ""
-    echo -n -e "${UI_YELLOW}Cấu hình SSL cho subdomain? [Y/n]: ${UI_NC}"
-    read -r setup_ssl
-    if [[ ! "$setup_ssl" =~ ^[Nn]$ ]]; then
-        setup_nocodb_ssl
+    # SSL setup option (only if domain is configured)
+    if [[ -n "$NOCODB_DOMAIN" ]]; then
+        echo ""
+        echo -n -e "${UI_YELLOW}Cấu hình SSL cho $NOCODB_DOMAIN? [Y/n]: ${UI_NC}"
+        read -r setup_ssl
+        if [[ ! "$setup_ssl" =~ ^[Nn]$ ]]; then
+            setup_nocodb_ssl
+        fi
     fi
     
     ui_status "success" "NocoDB integration hoàn tất!"
@@ -101,7 +175,8 @@ setup_nocodb_integration() {
         "URL: $nocodb_url" \
         "Email: $(config_get "nocodb.admin_email")" \
         "Password: $(get_nocodb_admin_password)" \
-        "Database: $NOCODB_DATABASE_MODE ($NOCODB_DB_NAME)"
+        "Database: $NOCODB_DATABASE_MODE ($NOCODB_DB_NAME)" \
+        "$([ -n "$NOCODB_DOMAIN" ] && echo "Domain: $NOCODB_DOMAIN")"
     
     # Show N8N database connection info for both modes
     local n8n_postgres_password=$(grep "POSTGRES_PASSWORD=" "$N8N_COMPOSE_DIR/.env" | cut -d'=' -f2)
@@ -118,17 +193,18 @@ setup_nocodb_integration() {
 }
 
 get_nocodb_url() {
-    local domain=$(config_get "nocodb.domain" "")
-    if [[ -n "$domain" ]]; then
-        echo "https://$domain"
-    else
-        local main_domain=$(config_get "n8n.domain" "")
-        if [[ -n "$main_domain" ]]; then
-            echo "https://db.$main_domain"
+    if [[ -n "$NOCODB_DOMAIN" ]]; then
+        # Use custom domain
+        local ssl_enabled=$(config_get "nocodb.ssl_enabled" "false")
+        if [[ "$ssl_enabled" == "true" ]]; then
+            echo "https://$NOCODB_DOMAIN"
         else
-            local public_ip=$(get_public_ip || echo "localhost")
-            echo "http://$public_ip:8080"
+            echo "http://$NOCODB_DOMAIN"
         fi
+    else
+        # Use IP:Port
+        local public_ip=$(get_public_ip || echo "localhost")
+        echo "http://$public_ip:8080"
     fi
 }
 
@@ -182,16 +258,26 @@ generate_nocodb_secrets() {
         return 1
     fi
     
+    # Determine public URL based on domain choice
+    local public_url
+    if [[ -n "$NOCODB_DOMAIN" ]]; then
+        public_url="https://$NOCODB_DOMAIN"
+    else
+        local public_ip=$(get_public_ip || echo "localhost")
+        public_url="http://$public_ip:8080"
+    fi
+    
     # Add NocoDB config to .env if not exists
     if ! grep -q "NOCODB_JWT_SECRET" "$N8N_COMPOSE_DIR/.env"; then
         cat >> "$N8N_COMPOSE_DIR/.env" << EOF
 
 # NocoDB Configuration - Added by DataOnline Manager
 NOCODB_DATABASE_MODE=$NOCODB_DATABASE_MODE
+NOCODB_DOMAIN=$NOCODB_DOMAIN
 NOCODB_JWT_SECRET=$jwt_secret
 NOCODB_ADMIN_EMAIL=$admin_email
 NOCODB_ADMIN_PASSWORD=$admin_password
-NOCODB_PUBLIC_URL=https://db.$(config_get "n8n.domain" "localhost")
+NOCODB_PUBLIC_URL=$public_url
 
 # NocoDB Database Configuration
 NC_DB_TYPE=pg
@@ -214,6 +300,7 @@ EOF
     
     # Update config
     config_set "nocodb.admin_email" "$admin_email"
+    config_set "nocodb.domain" "$NOCODB_DOMAIN"
     config_set "nocodb.database_mode" "$NOCODB_DATABASE_MODE"
     config_set "nocodb.database_name" "$NOCODB_DB_NAME"
     config_set "nocodb.installed" "true"
@@ -224,7 +311,9 @@ EOF
     ui_info_box "Thông tin đăng nhập" \
         "Email: $admin_email" \
         "Password: $admin_password" \
-        "Mode: $NOCODB_DATABASE_MODE"
+        "Mode: $NOCODB_DATABASE_MODE" \
+        "$([ -n "$NOCODB_DOMAIN" ] && echo "Domain: $NOCODB_DOMAIN")" \
+        "Public URL: $public_url"
     
     return 0
 }
@@ -664,10 +753,6 @@ wait_for_nocodb_ready() {
             return 1
         fi
         
-        # Check container health
-        local container_status=$(docker inspect n8n-nocodb --format='{{.State.Status}}' 2>/dev/null || echo "unknown")
-        local container_health=$(docker inspect n8n-nocodb --format='{{.State.Health.Status}}' 2>/dev/null || echo "none")
-        
         # Check API health
         if curl -s -f "$health_url" >/dev/null 2>&1; then
             ui_stop_spinner
@@ -695,6 +780,7 @@ wait_for_nocodb_ready() {
     echo "Debug information:"
     echo "Container status: $(docker inspect n8n-nocodb --format='{{.State.Status}}' 2>/dev/null || echo 'unknown')"
     echo "Database mode: $NOCODB_DATABASE_MODE"
+    echo "Domain: ${NOCODB_DOMAIN:-'IP:Port'}"
     echo "Recent logs:"
     docker logs --tail 10 n8n-nocodb 2>&1 | head -10
     
@@ -722,48 +808,43 @@ configure_nocodb_database() {
     fi
 }
 
-# ===== SSL SUBDOMAIN SETUP =====
+# ===== SSL SUBDOMAIN SETUP (UPDATED) =====
 
 setup_nocodb_ssl() {
-    local main_domain=$(config_get "n8n.domain" "")
-    local subdomain="db.$main_domain"
-    
-    if [[ -z "$main_domain" ]]; then
-        echo -n -e "${UI_WHITE}Nhập domain chính (VD: n8n-store.xyz): ${UI_NC}"
-        read -r main_domain
-        config_set "n8n.domain" "$main_domain"
-        subdomain="db.$main_domain"
+    if [[ -z "$NOCODB_DOMAIN" ]]; then
+        ui_status "error" "Chưa cấu hình domain cho NocoDB"
+        return 1
     fi
     
     ui_info_box "SSL Setup cho NocoDB" \
-        "Domain: $subdomain" \
+        "Domain: $NOCODB_DOMAIN" \
         "Port: 8080 → 443" \
         "Certificate: Let's Encrypt"
     
-    if ! ui_confirm "Setup SSL cho $subdomain?"; then
+    if ! ui_confirm "Setup SSL cho $NOCODB_DOMAIN?"; then
         return 0
     fi
     
     # Create nginx config
-    create_nocodb_nginx_config "$subdomain"
+    create_nocodb_nginx_config "$NOCODB_DOMAIN"
     
     # Get SSL certificate
-    obtain_nocodb_ssl_certificate "$subdomain"
+    obtain_nocodb_ssl_certificate "$NOCODB_DOMAIN"
     
     # Update NocoDB config
-    update_nocodb_ssl_config "$subdomain"
+    update_nocodb_ssl_config "$NOCODB_DOMAIN"
 }
 
 create_nocodb_nginx_config() {
-    local subdomain="$1"
-    local nginx_conf="/etc/nginx/sites-available/${subdomain}.conf"
+    local domain="$1"
+    local nginx_conf="/etc/nginx/sites-available/${domain}.conf"
     
-    ui_start_spinner "Tạo Nginx config cho $subdomain"
+    ui_start_spinner "Tạo Nginx config cho $domain"
     
     cat > "$nginx_conf" << EOF
 server {
     listen 80;
-    server_name $subdomain;
+    server_name $domain;
 
     location /.well-known/acme-challenge/ {
         root /var/www/html;
@@ -777,18 +858,18 @@ server {
 
 server {
     listen 443 ssl http2;
-    server_name $subdomain;
+    server_name $domain;
 
-    ssl_certificate /etc/letsencrypt/live/$subdomain/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/$subdomain/privkey.pem;
+    ssl_certificate /etc/letsencrypt/live/$domain/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/$domain/privkey.pem;
     
     include /etc/letsencrypt/options-ssl-nginx.conf;
     ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
 
     client_max_body_size 100M;
     
-    access_log /var/log/nginx/$subdomain.access.log;
-    error_log /var/log/nginx/$subdomain.error.log;
+    access_log /var/log/nginx/$domain.access.log;
+    error_log /var/log/nginx/$domain.error.log;
 
     location / {
         proxy_pass http://127.0.0.1:8080;
@@ -817,8 +898,8 @@ EOF
 }
 
 obtain_nocodb_ssl_certificate() {
-    local subdomain="$1"
-    local email="admin@$(config_get "n8n.domain")"
+    local domain="$1"
+    local email="admin@$(echo "$domain" | cut -d'.' -f2-)"
     
     # Ensure webroot exists
     mkdir -p /var/www/html/.well-known/acme-challenge
@@ -833,11 +914,11 @@ obtain_nocodb_ssl_certificate() {
     # Reload nginx
     systemctl reload nginx
     
-    ui_start_spinner "Lấy SSL certificate cho $subdomain"
+    ui_start_spinner "Lấy SSL certificate cho $domain"
     
     if certbot certonly --webroot \
         -w /var/www/html \
-        -d "$subdomain" \
+        -d "$domain" \
         --agree-tos \
         --email "$email" \
         --non-interactive; then
@@ -864,15 +945,15 @@ obtain_nocodb_ssl_certificate() {
 }
 
 update_nocodb_ssl_config() {
-    local subdomain="$1"
+    local domain="$1"
     
     ui_start_spinner "Cập nhật NocoDB config"
     
     # Update .env
-    sed -i "s|NOCODB_PUBLIC_URL=.*|NOCODB_PUBLIC_URL=https://$subdomain|" "$N8N_COMPOSE_DIR/.env"
+    sed -i "s|NOCODB_PUBLIC_URL=.*|NOCODB_PUBLIC_URL=https://$domain|" "$N8N_COMPOSE_DIR/.env"
     
     # Save to manager config
-    config_set "nocodb.domain" "$subdomain"
+    config_set "nocodb.domain" "$domain"
     config_set "nocodb.ssl_enabled" "true"
     
     # Restart NocoDB
@@ -1039,6 +1120,7 @@ clean_nocodb_config() {
     # Remove from manager config
     config_set "nocodb.installed" "false"
     config_set "nocodb.admin_email" ""
+    config_set "nocodb.domain" ""
     config_set "nocodb.database_mode" ""
     config_set "nocodb.database_name" ""
     
@@ -1051,7 +1133,12 @@ nocodb_maintenance() {
     ui_section "Bảo trì NocoDB"
     
     local database_mode=$(config_get "nocodb.database_mode" "shared")
+    local nocodb_domain=$(config_get "nocodb.domain" "")
+    
     echo "Database mode: $database_mode"
+    if [[ -n "$nocodb_domain" ]]; then
+        echo "Domain: $nocodb_domain"
+    fi
     echo ""
     
     echo "1) 🔄 Restart NocoDB"
@@ -1122,7 +1209,12 @@ check_nocodb_resources() {
     ui_section "Tài nguyên NocoDB"
     
     local database_mode=$(config_get "nocodb.database_mode" "shared")
+    local nocodb_domain=$(config_get "nocodb.domain" "")
+    
     echo "Database mode: $database_mode"
+    if [[ -n "$nocodb_domain" ]]; then
+        echo "Domain: $nocodb_domain"
+    fi
     echo ""
     
     if docker ps --format '{{.Names}}' | grep -q "^${NOCODB_CONTAINER}$"; then
