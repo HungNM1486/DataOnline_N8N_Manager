@@ -318,56 +318,53 @@ check_nocodb_prerequisites() {
 # ===== SSL SETUP FUNCTION =====
 
 setup_nocodb_ssl() {
-    local main_domain=$(config_get "n8n.domain" "")
-    local subdomain="db.$main_domain"
+    local nocodb_domain=$(config_get "nocodb.domain" "")
     
-    if [[ -z "$main_domain" ]]; then
-        echo -n -e "${UI_WHITE}Nhập domain chính (VD: n8n-store.xyz): ${UI_NC}"
-        read -r main_domain
-        config_set "n8n.domain" "$main_domain"
-        subdomain="db.$main_domain"
+    if [[ -z "$nocodb_domain" ]]; then
+        local main_domain=$(config_get "n8n.domain" "")
+        if [[ -z "$main_domain" ]]; then
+            echo -n -e "${UI_WHITE}Nhập domain chính (VD: n8n-store.xyz): ${UI_NC}"
+            read -r main_domain
+            config_set "n8n.domain" "$main_domain"
+        fi
+        nocodb_domain="db.$main_domain"
+        config_set "nocodb.domain" "$nocodb_domain"
     fi
     
     ui_info_box "SSL Setup cho NocoDB" \
-        "Domain: $subdomain" \
+        "Domain: $nocodb_domain" \
         "Port: 8080 → 443" \
         "Certificate: Let's Encrypt"
     
-    if ! ui_confirm "Setup SSL cho $subdomain?"; then
+    if ! ui_confirm "Setup SSL cho $nocodb_domain?"; then
         return 0
     fi
     
-    # Check if SSL plugin exists
+    # Fix SSL plugin path
     local ssl_plugin="$PLUGIN_PROJECT_ROOT/plugins/ssl/main.sh"
-    ui_status "info" "Đang kiểm tra SSL plugin tại: $ssl_plugin"
+    
     if [[ -f "$ssl_plugin" ]]; then
-        # Use existing SSL plugin logic
         source "$ssl_plugin"
-        
-        # Create nginx config for subdomain
-        create_nocodb_nginx_config "$subdomain"
-        
-        # Get SSL certificate
-        obtain_nocodb_ssl_certificate "$subdomain"
-        
-        # Update NocoDB config
-        update_nocodb_ssl_config "$subdomain"
+        create_nocodb_nginx_config "$nocodb_domain"
+        obtain_nocodb_ssl_certificate "$nocodb_domain"
+        upgrade_to_https_config "$nocodb_domain"
+        update_nocodb_ssl_config "$nocodb_domain"
     else
-        ui_status "error" "SSL plugin không tồn tại tại đường dẫn: $ssl_plugin"
-        ui_status "info" "Vui lòng kiểm tra lại biến PLUGIN_PROJECT_ROOT hoặc đường dẫn src/plugins/ssl/main.sh."
-    fi
+        ui_status "error" "SSL plugin không tồn tại: $ssl_plugin"
+    fi   
 }
 
 create_nocodb_nginx_config() {
-    local subdomain="$1"
-    local nginx_conf="/etc/nginx/sites-available/${subdomain}.conf"
+    local domain="$1"
+    local nginx_conf="/etc/nginx/sites-available/${domain}.conf"
     
-    ui_start_spinner "Tạo Nginx config cho $subdomain"
+    ui_start_spinner "Tạo HTTP config cho $domain"
     
+    # Create HTTP-only config first
     sudo tee "$nginx_conf" > /dev/null << EOF
 server {
     listen 80;
-    server_name $subdomain;
+    server_name $domain;
 
     location /.well-known/acme-challenge/ {
         root /var/www/html;
@@ -375,24 +372,43 @@ server {
     }
 
     location / {
-        return 301 https://\$host\$request_uri;
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
     }
+}
+EOF
+
+    sudo ln -sf "$nginx_conf" /etc/nginx/sites-enabled/
+    sudo nginx -t && sudo systemctl reload nginx
+    ui_stop_spinner
+    ui_status "success" "HTTP config tạo thành công"
+}
+
+upgrade_to_https_config() {
+    local domain="$1"
+    local nginx_conf="/etc/nginx/sites-available/${domain}.conf"
+    
+    ui_start_spinner "Nâng cấp lên HTTPS"
+    
+    sudo tee "$nginx_conf" > /dev/null << EOF
+server {
+    listen 80;
+    server_name $domain;
+    return 301 https://\$host\$request_uri;
 }
 
 server {
     listen 443 ssl http2;
-    server_name $subdomain;
+    server_name $domain;
 
-    ssl_certificate /etc/letsencrypt/live/$subdomain/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/$subdomain/privkey.pem;
+    ssl_certificate /etc/letsencrypt/live/$domain/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/$domain/privkey.pem;
     
     include /etc/letsencrypt/options-ssl-nginx.conf;
     ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
-
-    client_max_body_size 100M;
-    
-    access_log /var/log/nginx/$subdomain.access.log;
-    error_log /var/log/nginx/$subdomain.error.log;
 
     location / {
         proxy_pass http://127.0.0.1:8080;
@@ -400,24 +416,13 @@ server {
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
-        
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection 'upgrade';
-        proxy_cache_bypass \$http_upgrade;
-        
-        proxy_buffering off;
-        proxy_read_timeout 7200s;
-        proxy_send_timeout 7200s;
     }
 }
 EOF
 
-    # Enable site
-    sudo ln -sf "$nginx_conf" /etc/nginx/sites-enabled/
-    
+    sudo nginx -t && sudo systemctl reload nginx
     ui_stop_spinner
-    ui_status "success" "Nginx config tạo thành công"
+    ui_status "success" "HTTPS config hoạt động"
 }
 
 obtain_nocodb_ssl_certificate() {
