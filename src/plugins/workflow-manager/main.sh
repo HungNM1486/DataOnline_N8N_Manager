@@ -146,8 +146,31 @@ check_gdrive() {
     command -v rclone >/dev/null 2>&1 && [[ -f "$HOME/.config/rclone/rclone.conf" ]]
 }
 
+get_gdrive_remote_name() {
+    if [[ ! -f "$HOME/.config/rclone/rclone.conf" ]]; then
+        return 1
+    fi
+    
+    # Find Google Drive remote (type = drive)
+    local remote_name=$(rclone listremotes | grep -E "^.*:$" | while read -r line; do
+        local name="${line%:}"
+        local type=$(rclone config show "$name" | grep "type = " | cut -d' ' -f3)
+        if [[ "$type" == "drive" ]]; then
+            echo "$name"
+            break
+        fi
+    done)
+    
+    if [[ -n "$remote_name" ]]; then
+        echo "$remote_name"
+        return 0
+    else
+        return 1
+    fi
+}
+
 get_gdrive_remote() {
-    rclone listremotes | head -1 | sed 's/://'
+    get_gdrive_remote_name
 }
 
 # ===== LIST WORKFLOWS =====
@@ -244,10 +267,17 @@ export_all_workflows() {
     echo "📊 Total exported: $count workflows"
     echo "📁 Temp directory: $temp_dir"
     
-    # Force continue to Google Drive upload
+    # FIXED: Auto-detect remote name
     echo "☁️  Starting Google Drive upload..."
     
-    local remote_name="n8n"
+    local remote_name
+    if ! remote_name=$(get_gdrive_remote_name); then
+        echo "❌ Không tìm thấy Google Drive remote"
+        set -e
+        return 1
+    fi
+    
+    echo "✅ Detected remote: $remote_name"
     
     # Test connection
     if rclone lsd "$remote_name:" >/dev/null 2>&1; then
@@ -324,7 +354,16 @@ export_selected_workflows() {
     
     if [[ $count -gt 0 ]]; then
         echo "☁️  Uploading $count workflows..."
-        local remote_name="n8n"
+        
+        # FIXED: Auto-detect remote name
+        local remote_name
+        if ! remote_name=$(get_gdrive_remote_name); then
+            echo "❌ Không tìm thấy Google Drive remote"
+            set -e
+            return 1
+        fi
+        
+        echo "✅ Detected remote: $remote_name"
         rclone mkdir "$remote_name:n8n-workflows" 2>/dev/null || true
         
         if rclone copy "$temp_dir/" "$remote_name:n8n-workflows/" --include "*.json" --progress; then
@@ -375,14 +414,15 @@ import_menu() {
         return 1
     fi
     
-    local remote_name=$(get_gdrive_remote)
-    if [[ -z "$remote_name" ]]; then
-        ui_status "error" "Google Drive remote không tìm thấy"
+    # FIXED: Auto-detect remote name
+    local remote_name
+    if ! remote_name=$(get_gdrive_remote_name); then
+        ui_status "error" "Không tìm thấy Google Drive remote"
         return 1
     fi
     
     ui_start_spinner "Lấy danh sách files từ Google Drive"
-    local files=$(rclone ls "${remote_name}:${GDRIVE_FOLDER}/" --include "*.json" 2>/dev/null)
+    local files=$(rclone ls "${remote_name}:n8n-workflows/" --include "*.json" 2>/dev/null)
     ui_stop_spinner
     
     if [[ -z "$files" ]]; then
@@ -412,7 +452,7 @@ import_menu() {
     if [[ "$selection" == "all" ]]; then
         # Download all files
         ui_start_spinner "Download tất cả files"
-        rclone copy "${remote_name}:${GDRIVE_FOLDER}/" "$temp_dir/" --include "*.json"
+        rclone copy "${remote_name}:n8n-workflows/" "$temp_dir/" --include "*.json"
         ui_stop_spinner
         
         import_workflow_files "$temp_dir"
@@ -423,7 +463,7 @@ import_menu() {
         
         if [[ -n "$selected_file" ]]; then
             ui_start_spinner "Download $selected_file"
-            rclone copy "${remote_name}:${GDRIVE_FOLDER}/$selected_file" "$temp_dir/"
+            rclone copy "${remote_name}:n8n-workflows/$selected_file" "$temp_dir/"
             ui_stop_spinner
             
             import_workflow_files "$temp_dir"
