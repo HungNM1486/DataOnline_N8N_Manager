@@ -1,7 +1,8 @@
 #!/bin/bash
 
 # DataOnline N8N Manager - Simplified Workflow Manager
-# Phiên bản: 2.0.0 - Core Functions Only
+# Phiên bản: 1.0.0
+# Quản lý workflows N8N với giao diện đơn giản và hiệu quả
 
 set -euo pipefail
 
@@ -266,8 +267,8 @@ export_all_workflows() {
     echo ""
     echo "📊 Total exported: $count workflows"
     echo "📁 Temp directory: $temp_dir"
-    
-    # FIXED: Auto-detect remote name
+
+    # Auto-detect remote name
     echo "☁️  Starting Google Drive upload..."
     
     local remote_name
@@ -354,8 +355,8 @@ export_selected_workflows() {
     
     if [[ $count -gt 0 ]]; then
         echo "☁️  Uploading $count workflows..."
-        
-        # FIXED: Auto-detect remote name
+
+        # Auto-detect remote name
         local remote_name
         if ! remote_name=$(get_gdrive_remote_name); then
             echo "❌ Không tìm thấy Google Drive remote"
@@ -413,8 +414,8 @@ import_menu() {
         ui_status "error" "Google Drive chưa được cấu hình"
         return 1
     fi
-    
-    # FIXED: Auto-detect remote name
+
+    # Auto-detect remote name
     local remote_name
     if ! remote_name=$(get_gdrive_remote_name); then
         ui_status "error" "Không tìm thấy Google Drive remote"

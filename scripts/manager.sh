@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # DataOnline N8N Manager
-# Phiên bản: 1.0.0-dev
+# Phiên bản: 1.0.0
 # Tác giả: DataOnline Team
 
 set -euo pipefail

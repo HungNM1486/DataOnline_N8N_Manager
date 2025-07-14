@@ -11,12 +11,10 @@ if [[ -z "${LOGGER_LOADED:-}" ]]; then
     source "$SCRIPT_DIR/logger.sh"
 fi
 
-# Đường dẫn cấu hình
 readonly DEFAULT_CONFIG_DIR="/etc/datalonline-n8n"
 readonly USER_CONFIG_DIR="$HOME/.config/datalonline-n8n"
 readonly PROJECT_CONFIG_DIR="$(dirname "$SCRIPT_DIR")/config"
 
-# File cấu hình
 CONFIG_DIR=""
 CONFIG_FILE=""
 

@@ -1,6 +1,9 @@
 #!/bin/bash
 
-# Nginx Service Management Module
+# DataOnline N8N Manager - Nginx Service Management
+# Phiên bản: 1.0.0
+# Quản lý dịch vụ Nginx
+
 set -euo pipefail
 
 get_nginx_status() {

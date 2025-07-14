@@ -24,7 +24,7 @@ readonly SPINNER_SIMPLE=('-' '\' '|' '/')
 
 # Global spinner state
 SPINNER_PID=0
-SPINNER_TYPE="dots"
+SPINNER_TYPE="dots" 
 SPINNER_DELAY=0.1
 
 # ===== CORE SPINNER FUNCTIONS =====

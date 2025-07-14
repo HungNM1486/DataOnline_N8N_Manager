@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# DataOnline N8N Manager - Plugin Backup (FIXED)
-# Phiên bản: 1.0.2 - Auto-detect Google Drive remote name
+# DataOnline N8N Manager - Plugin Backup
+# Phiên bản: 1.0.0
 
 set -euo pipefail
 
@@ -253,7 +253,7 @@ EOF
     echo "$BACKUP_BASE_DIR/${backup_name}.tar.gz"
 }
 
-# Upload backup lên Google Drive (FIXED - Auto-detect remote name)
+# Upload backup lên Google Drive 
 upload_to_gdrive() {
     local backup_file="$1"
     
@@ -280,7 +280,7 @@ upload_to_gdrive() {
     fi
 }
 
-# Cleanup backup cũ (FIXED - Auto-detect remote name)
+# Cleanup backup cũ 
 cleanup_old_backups() {
     local retention_days=$(config_get "backup.retention_days" "30")
 
@@ -473,7 +473,7 @@ restore_backup() {
 
 # ===== CRON JOB MANAGEMENT =====
 
-# Cài đặt cron job (FIXED)
+# Cài đặt cron job 
 setup_cron_job() {
     local frequency="$1" # daily, weekly, monthly
     local hour="${2:-2}" # Default 2 AM
@@ -541,7 +541,7 @@ EOF
     return 0
 }
 
-# ===== GOOGLE DRIVE SETUP (FIXED - Auto-detect remote name) =====
+# ===== GOOGLE DRIVE SETUP =====
 
 # Cấu hình Google Drive
 setup_google_drive() {
@@ -759,7 +759,7 @@ backup_schedule_menu() {
     fi
 }
 
-# Liệt kê backup (FIXED - Auto-detect remote name)
+# Liệt kê backup
 backup_list() {
     log_info "📋 DANH SÁCH BACKUP"
     echo ""

@@ -1,7 +1,8 @@
 #!/bin/bash
 
-# DataOnline N8N Manager - SSL Automation Plugin (FIXED)
-# Phiên bản: 1.0.3 - Fixed Nginx Config Order
+# DataOnline N8N Manager - SSL Automation Plugin
+# Phiên bản: 1.0.0
+# Tự động hóa cài đặt SSL cho N8N với Let's Encrypt
 
 set -euo pipefail
 
@@ -50,9 +51,8 @@ validate_domain_dns() {
     fi
 }
 
-# ===== NGINX CONFIGURATION (FIXED) =====
+# ===== NGINX CONFIGURATION =====
 
-# FIXED: Create HTTP-only config first, then upgrade to HTTPS
 create_nginx_http_config() {
     local domain="$1"
     local n8n_port="${2:-5678}"
@@ -266,7 +266,6 @@ install_certbot() {
     "
 }
 
-# FIXED: Simplified certificate acquisition
 obtain_ssl_certificate() {
     local domain="$1"
     local email="$2"
@@ -481,7 +480,7 @@ update_n8n_ssl_config() {
     config_set "n8n.webhook_url" "https://$domain"
 }
 
-# ===== MAIN SSL SETUP FUNCTION (FIXED) =====
+# ===== MAIN SSL SETUP FUNCTION =====
 
 setup_ssl_main() {
     ui_header "Cài đặt SSL với Let's Encrypt"
@@ -541,7 +540,7 @@ setup_ssl_main() {
     # Install dependencies
     install_certbot || return 1
 
-    # FIXED: Create HTTP config first
+    # Create HTTP config first
     if ! create_nginx_http_config "$domain" "$n8n_port"; then
         return 1
     fi
@@ -552,7 +551,7 @@ setup_ssl_main() {
         return 1
     fi
 
-    # FIXED: Only create HTTPS config after certificate exists
+    # Only create HTTPS config after certificate exists
     if [[ -f "/etc/letsencrypt/live/$domain/fullchain.pem" ]]; then
         # Create full HTTPS config
         create_nginx_ssl_config "$domain" "$n8n_port" || return 1

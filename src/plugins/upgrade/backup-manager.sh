@@ -2,6 +2,7 @@
 
 # DataOnline N8N Manager - Backup Manager Module
 # Phiên bản: 1.0.0
+# Quản lý backup trước nâng cấp N8N, bao gồm tạo, phục hồi và xác minh backup
 
 set -euo pipefail
 

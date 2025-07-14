@@ -1,15 +1,13 @@
 #!/bin/bash
 
 # DataOnline N8N Manager - Simplified Install Plugin
-# Phiên bản: 1.0.1 - Simplified Installation Menu
+# Phiên bản: 1.0.0
 
 set -euo pipefail
 
-# Source core modules
 PLUGIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_PROJECT_ROOT="$(dirname "$(dirname "$PLUGIN_DIR")")"
 
-# Load core modules
 if [[ -z "${LOGGER_LOADED:-}" ]]; then
     source "$PLUGIN_PROJECT_ROOT/src/core/logger.sh"
 fi
@@ -26,7 +24,6 @@ if [[ -z "${SPINNER_LOADED:-}" ]]; then
     source "$PLUGIN_PROJECT_ROOT/src/core/spinner.sh"
 fi
 
-# Constants
 readonly INSTALL_DOCKER_COMPOSE_VERSION="2.24.5"
 readonly REQUIRED_RAM_MB=2048
 readonly REQUIRED_DISK_GB=10
@@ -908,5 +905,4 @@ show_post_install_guide() {
         "Logs: sudo docker compose -f /opt/n8n/docker-compose.yml logs -f"
 }
 
-# Export main function
 export -f install_n8n_main

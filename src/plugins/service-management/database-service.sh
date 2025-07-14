@@ -1,6 +1,9 @@
 #!/bin/bash
 
-# Database Service Management Module
+# DataOnline N8N Manager - Database Service Management
+# Phiên bản: 1.0.0
+# Quản lý dịch vụ Database (PostgreSQL) cho N8N
+
 set -euo pipefail
 
 if [[ -z "${N8N_COMPOSE_DIR:-}" ]]; then

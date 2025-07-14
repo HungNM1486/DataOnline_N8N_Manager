@@ -2,6 +2,7 @@
 
 # DataOnline N8N Manager - Upgrade Plugin
 # Phiên bản: 1.0.0
+# Tự động nâng cấp N8N lên phiên bản mới nhất
 
 set -euo pipefail
 

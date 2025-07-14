@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # DataOnline N8N Manager - Database Manager Plugin  
-# Phiên bản: 1.0.3 - Simplified Menu (8 core functions)
+# Phiên bản: 1.0.0
 # Mô tả: NocoDB integration cho quản lý database N8N
 
 set -euo pipefail

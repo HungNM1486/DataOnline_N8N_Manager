@@ -2,6 +2,7 @@
 
 # DataOnline N8N Manager - Version Manager Module
 # Phiên bản: 1.0.0
+# Quản lý phiên bản N8N, kiểm tra nâng cấp, và thông tin phát hành
 
 set -euo pipefail
 

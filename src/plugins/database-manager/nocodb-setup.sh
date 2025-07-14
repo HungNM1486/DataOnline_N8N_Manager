@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # DataOnline N8N Manager - NocoDB Setup & Docker Integration
-# Phiên bản: 1.0.4 - Complete Rewrite with Fixed Domain Logic
+# Phiên bản: 1.0.0
 
 set -euo pipefail
 
@@ -14,7 +14,7 @@ NOCODB_ADMIN_EMAIL=""
 NOCODB_ADMIN_PASSWORD=""
 NOCODB_JWT_SECRET=""
 
-# ===== DOMAIN CONFIGURATION (FIXED) =====
+# ===== DOMAIN CONFIGURATION =====
 
 configure_nocodb_domain() {
     ui_section "Cấu hình Domain cho NocoDB"
@@ -196,7 +196,7 @@ setup_nocodb_integration() {
         echo -n -e "${UI_YELLOW}Cấu hình SSL cho $NOCODB_DOMAIN? [Y/n]: ${UI_NC}"
         read -r setup_ssl
         if [[ ! "$setup_ssl" =~ ^[Nn]$ ]]; then
-            setup_nocodb_ssl  # <-- Fix: không truyền parameter
+            setup_nocodb_ssl
         fi
     fi
     
@@ -611,13 +611,13 @@ wait_for_nocodb_ready() {
     return 1
 }
 
-# ===== SSL SETUP (FIXED ORDER) =====
+# ===== SSL SETUP =====
 
 setup_nocodb_ssl() {
-    local domain="$NOCODB_DOMAIN"  # <-- Fix: dùng biến global
+    local domain="$NOCODB_DOMAIN"  
     
     ui_section "Cài đặt SSL cho NocoDB"
-    ui_status "info" "Domain được set: $domain"  # Debug line
+    ui_status "info" "Domain được set: $domain"
     
     # Step 1: Create HTTP-only nginx config
     if ! create_nocodb_http_config "$domain"; then

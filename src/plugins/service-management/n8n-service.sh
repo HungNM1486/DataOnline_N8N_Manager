@@ -1,6 +1,9 @@
 #!/bin/bash
 
-# N8N Service Management Module
+# DataOnline N8N Manager - N8N Service Management
+# Phiên bản: 1.0.0
+# Quản lý dịch vụ N8N
+
 set -euo pipefail
 
 readonly N8N_COMPOSE_DIR="/opt/n8n"

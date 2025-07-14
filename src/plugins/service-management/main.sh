@@ -1,6 +1,9 @@
 #!/bin/bash
 
 # DataOnline N8N Manager - Service Management Plugin
+# Phiên bản: 1.0.0
+# Quản lý các dịch vụ N8N, Nginx, Database
+
 set -euo pipefail
 
 PLUGIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
