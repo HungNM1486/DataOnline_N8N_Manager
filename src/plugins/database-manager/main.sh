@@ -42,11 +42,8 @@ database_manager_main() {
         1) check_nocodb_status ;;
         2) install_nocodb ;;
         3) open_nocodb_interface ;;
-        4) backup_nocodb_config ;;
-        5) nocodb_maintenance ;;
-        6) show_nocodb_logs ;;
-        7) setup_nocodb_ssl ;; 
-        8) uninstall_nocodb ;;
+        4) setup_nocodb_ssl ;; 
+        5) uninstall_nocodb ;;
         0) return 0 ;;
         *) ui_status "error" "Lựa chọn không hợp lệ" ;;
         esac
@@ -75,11 +72,8 @@ show_database_manager_menu() {
     echo "1) 📊 Kiểm tra trạng thái"
     echo "2) 🚀 Cài đặt NocoDB"
     echo "3) 🌐 Mở giao diện NocoDB"
-    echo "4) 💾 Backup cấu hình"
-    echo "5) 🔧 Bảo trì & tối ưu"
-    echo "6) 📝 Xem logs"
-    echo "7) 🔒 Cài đặt SSL"
-    echo "8) 🗑️  Gỡ cài đặt NocoDB"
+    echo "4) 🔒 Cài đặt SSL"
+    echo "5) 🗑️  Gỡ cài đặt NocoDB"
     echo "0) ⬅️  Quay lại"
     echo ""
 }
