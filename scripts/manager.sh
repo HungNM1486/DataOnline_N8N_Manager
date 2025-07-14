@@ -49,6 +49,7 @@ show_main_menu() {
     echo -e "4️⃣  💾 Sao lưu & khôi phục"
     echo -e "5️⃣  🔄 Cập nhật phiên bản"
     echo -e "6️⃣  🗄️  Quản lý Database"
+    echo -e "7️⃣  🔄 Workflow Manager"
     echo ""
     echo -e "${LOG_WHITE}HỖ TRỢ:${LOG_NC}"
     echo -e "A️  📋 Thông tin hệ thống"
@@ -72,6 +73,7 @@ handle_selection() {
     4) handle_backup_restore ;;
     5) handle_updates ;;
     6) handle_database_management ;;
+    7) handle_workflow_management ;;
     A | a) show_system_info ;;
     B | b) show_configuration_menu ;;
     C | c) show_help ;;
@@ -331,6 +333,18 @@ handle_database_management() {
         echo "   chmod +x $PROJECT_ROOT/src/plugins/database-manager/*.sh"
         echo ""
         read -p "Nhấn Enter để tiếp tục..."
+        return 1
+    fi
+}
+
+# Xử lý quản lý workflow
+handle_workflow_management() {
+    local workflow_plugin="$PROJECT_ROOT/src/plugins/workflow-manager/main.sh"
+    if [[ -f "$workflow_plugin" ]]; then
+        source "$workflow_plugin"
+        workflow_manager_main
+    else
+        log_error "Workflow Manager plugin không tồn tại"
         return 1
     fi
 }

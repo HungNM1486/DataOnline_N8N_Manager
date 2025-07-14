@@ -100,16 +100,13 @@ get_nocodb_status() {
 
 get_nocodb_url() {
     local domain=$(config_get "nocodb.domain" "")
+    
+    # Chỉ hiển thị nếu đã thực sự cấu hình
     if [[ -n "$domain" ]]; then
         echo "https://$domain"
     else
-        local main_domain=$(config_get "n8n.domain" "")
-        if [[ -n "$main_domain" ]]; then
-            echo "https://db.$main_domain"
-        else
-            local public_ip=$(get_public_ip || echo "localhost")
-            echo "http://$public_ip:8080"
-        fi
+        # Không tự động tạo subdomain, return empty
+        echo ""
     fi
 }
 

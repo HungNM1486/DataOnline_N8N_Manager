@@ -731,6 +731,12 @@ create_nocodb_https_config() {
     local domain="$1"
     local nginx_conf="/etc/nginx/sites-available/${domain}.conf"
     
+    # Kiểm tra cert tồn tại trước
+    if [[ ! -f "/etc/letsencrypt/live/$domain/fullchain.pem" ]]; then
+        ui_status "error" "SSL certificate không tồn tại cho $domain"
+        return 1
+    fi
+    
     ui_start_spinner "Tạo HTTPS config"
     
     sudo tee "$nginx_conf" > /dev/null << EOF
