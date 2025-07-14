@@ -309,40 +309,105 @@ check_nocodb_prerequisites() {
 # ===== SSL SETUP FUNCTION =====
 
 setup_nocodb_ssl() {
-    local nocodb_domain=$(config_get "nocodb.domain" "")
+    ui_section "Cài đặt SSL cho NocoDB"
     
-    if [[ -z "$nocodb_domain" ]]; then
-        local main_domain=$(config_get "n8n.domain" "")
-        if [[ -z "$main_domain" ]]; then
-            echo -n -e "${UI_WHITE}Nhập domain chính (VD: n8n-store.xyz): ${UI_NC}"
-            read -r main_domain
-            config_set "n8n.domain" "$main_domain"
+    local nocodb_domain=""
+    local main_domain=$(config_get "n8n.domain" "")
+    
+    echo "📋 **Domain Options:**"
+    echo ""
+    if [[ -n "$main_domain" ]]; then
+        echo "1) Sử dụng subdomain: db.$main_domain"
+        echo "2) Nhập domain khác"
+    else
+        echo "1) Nhập domain mới"
+    fi
+    echo ""
+    
+    while true; do
+        if [[ -n "$main_domain" ]]; then
+            read -p "Chọn [1-2]: " domain_choice
+            case "$domain_choice" in
+            1) 
+                nocodb_domain="db.$main_domain"
+                break
+                ;;
+            2)
+                echo -n -e "${UI_WHITE}Nhập domain cho NocoDB: ${UI_NC}"
+                read -r nocodb_domain
+                if [[ -n "$nocodb_domain" ]]; then
+                    break
+                else
+                    ui_status "error" "Domain không được để trống"
+                fi
+                ;;
+            *)
+                ui_status "error" "Lựa chọn không hợp lệ"
+                ;;
+            esac
+        else
+            echo -n -e "${UI_WHITE}Nhập domain cho NocoDB: ${UI_NC}"
+            read -r nocodb_domain
+            if [[ -n "$nocodb_domain" ]]; then
+                break
+            else
+                ui_status "error" "Domain không được để trống"
+            fi
         fi
-        nocodb_domain="db.$main_domain"
-        config_set "nocodb.domain" "$nocodb_domain"
+    done
+    
+    # Validate domain format
+    if ! ui_validate_domain "$nocodb_domain"; then
+        ui_status "error" "Domain format không hợp lệ: $nocodb_domain"
+        return 1
     fi
     
-    ui_info_box "SSL Setup cho NocoDB" \
+    # Check DNS resolution
+    echo ""
+    ui_start_spinner "Kiểm tra DNS cho $nocodb_domain"
+    local server_ip=$(get_public_ip)
+    local resolved_ip=$(dig +short A "$nocodb_domain" @1.1.1.1 | tail -n1)
+    ui_stop_spinner
+    
+    if [[ -z "$resolved_ip" ]]; then
+        ui_status "error" "Domain không thể resolve: $nocodb_domain"
+        echo -n -e "${UI_YELLOW}Tiếp tục dù DNS chưa setup? [y/N]: ${UI_NC}"
+        read -r skip_dns
+        if [[ ! "$skip_dns" =~ ^[Yy]$ ]]; then
+            return 1
+        fi
+    elif [[ "$resolved_ip" != "$server_ip" ]]; then
+        ui_status "warning" "DNS trỏ về $resolved_ip (server: $server_ip)"
+        echo -n -e "${UI_YELLOW}Tiếp tục dù DNS không đúng? [y/N]: ${UI_NC}"
+        read -r skip_dns
+        if [[ ! "$skip_dns" =~ ^[Yy]$ ]]; then
+            return 1
+        fi
+    else
+        ui_status "success" "DNS OK: $nocodb_domain → $server_ip"
+    fi
+    
+    # Final confirmation
+    ui_info_box "SSL Setup Confirmation" \
         "Domain: $nocodb_domain" \
+        "Server IP: $server_ip" \
         "Port: 8080 → 443" \
         "Certificate: Let's Encrypt"
     
-    if ! ui_confirm "Setup SSL cho $nocodb_domain?"; then
+    if ! ui_confirm "Xác nhận setup SSL cho $nocodb_domain?"; then
         return 0
     fi
     
-    # Fix SSL plugin path
-    local ssl_plugin="$PLUGIN_PROJECT_ROOT/plugins/ssl/main.sh"
+    # Save domain to config
+    config_set "nocodb.domain" "$nocodb_domain"
     
-    if [[ -f "$ssl_plugin" ]]; then
-        source "$ssl_plugin"
-        create_nocodb_nginx_config "$nocodb_domain"
-        obtain_nocodb_ssl_certificate "$nocodb_domain"
-        upgrade_to_https_config "$nocodb_domain"
-        update_nocodb_ssl_config "$nocodb_domain"
-    else
-        ui_status "error" "SSL plugin không tồn tại: $ssl_plugin"
-    fi   
+    # SSL setup implementation
+    create_nocodb_nginx_config "$nocodb_domain" || return 1
+    obtain_nocodb_ssl_certificate "$nocodb_domain" || return 1
+    upgrade_to_https_config "$nocodb_domain" || return 1
+    update_nocodb_ssl_config "$nocodb_domain" || return 1
+    
+    ui_status "success" "SSL setup hoàn tất cho $nocodb_domain"
 }
 
 create_nocodb_nginx_config() {
